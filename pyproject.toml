@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bili-summary"
+version = "2.4.1"
+description = "B站视频一键转文字稿（可选 AI 总结）：yt-dlp 下载音频 → faster-whisper 转写 → 可选 DeepSeek 总结"
+readme = "README.md"
+requires-python = ">=3.9"  # yt-dlp / faster-whisper 新版均要求 Python 3.9+
+license = {text = "MIT"}
+authors = [{name = "Amontans"}]
+keywords = ["bilibili", "whisper", "transcript", "summary", "yt-dlp", "asr"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "yt-dlp",
+    "faster-whisper",
+    "openai",
+    "imageio-ffmpeg",
+]
+
+[project.scripts]
+bili-summary = "bili_summary:main"
+
+[tool.setuptools]
+py-modules = ["bili_summary"]

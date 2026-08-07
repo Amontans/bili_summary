@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# 虚拟环境（首次运行自动创建，不入库）
+.venv/
+venv/
+
+# 输出产物（转写/总结结果）
+output/
+transcripts/
+
+# 用户数据（交互模式生成的链接列表，退出自动删除）
+links.txt
+
+# 配置（--setup 生成，含 API Key）
+.env
+
+# 系统文件
+.DS_Store
+Thumbs.db
