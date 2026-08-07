@@ -11,7 +11,7 @@ bili_summary.py — B站视频一键转文字稿 + AI 总结（支持多链接�
   python bili_summary.py -f links.txt                       # 从文件读取链接（每行一个，# 开头为注释）
   python bili_summary.py -o output <链接...>                # 指定输出目录（默认 ./output）
   python bili_summary.py --no-summary <链接...>             # 只转写，不调用 AI 总结（无需 API Key）
-  python bili_summary.py --setup                            # 一键配置向导（API Key/镜像/模型预下载）
+  python bili_summary.py --setup                            # 一键配置向导（含注册 bili-summary 全局命令）
   python bili_summary.py --dry-run -f links.txt             # 只预览链接解析结果，不实际处理
   python bili_summary.py -p 2 -f links.txt                  # 并行：下载预取与转写重叠，2 路同时转写
   python bili_summary.py --skip-existing -f links.txt       # 断点续传：已转写过的视频直接跳过
@@ -899,6 +899,97 @@ def remove_env_key(path, key):
         f.writelines(ln for ln in lines if not ln.strip().startswith(key + "="))
 
 
+# ============ 注册全局命令 bili-summary（--setup 向导内调用） ============
+def register_cli_cmd():
+    """把 bili-summary 注册为全局命令（之后直接敲 bili-summary 即可）：
+    ① 在本项目 .venv 内 pip install -e . --no-deps 生成启动器（不复制代码、不装到系统）
+    ② Linux/macOS: 软链接到 ~/.local/bin/bili-summary；Windows: 生成 bili-summary.bat 并加入用户 PATH
+    ③ 会经用户确认后才修改用户环境（~/.local/bin 或用户 PATH）"""
+    print("\n⌨️ 注册全局命令 bili-summary（之后直接敲 bili-summary，不再需要 python bili_summary.py）")
+    try:
+        ans = input("   现在注册吗？[y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    if ans not in ("y", "yes"):
+        print("   已跳过（以后可重跑 --setup 注册；或手动见 README 方式 B2）")
+        return
+    vpy = _venv_python(VENV_DIR)
+    if not vpy:
+        print("   ⚠ 未找到虚拟环境 .venv，请先正常运行一次脚本后再注册")
+        return
+    print("   ① 在 .venv 内安装启动器（pip install -e . --no-deps）...")
+    try:
+        subprocess.run([vpy, "-m", "pip", "install", "-q", "-e", ".", "--no-deps"], check=True)
+        print("   ✅ 启动器已生成")
+    except Exception as e:
+        print(f"   ❌ 启动器安装失败: {e}")
+        print("      可手动执行: .venv/bin/pip install -e . --no-deps（Windows: .venv\\Scripts\\pip install -e . --no-deps）")
+        return
+    if sys.platform == "win32":
+        _register_win32_cli()
+    else:
+        _register_unix_cli()
+
+
+def _register_unix_cli():
+    """Linux/macOS: 软链接 .venv/bin/bili-summary -> ~/.local/bin/"""
+    bin_dir = os.path.expanduser("~/.local/bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    src = os.path.join(VENV_DIR, "bin", "bili-summary")
+    dst = os.path.join(bin_dir, "bili-summary")
+    try:
+        if os.path.islink(dst) or os.path.exists(dst):
+            os.remove(dst)
+        os.symlink(src, dst)
+        print(f"   ✅ 已创建软链接: {dst}")
+        if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+            print(f"   ⚠ 当前 PATH 不含 {bin_dir}，先加入一次（以后无需再改）:")
+            print(f"     echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && source ~/.bashrc")
+        print("   ✅ 完成！新开终端直接输入 bili-summary 即可")
+    except Exception as e:
+        print(f"   ❌ 创建软链接失败: {e}")
+        print("      可手动: ln -sf <项目目录>/.venv/bin/bili-summary ~/.local/bin/bili-summary")
+
+
+def _register_win32_cli():
+    """Windows: 生成 bili-summary.bat 并把项目目录加入用户 PATH（不碰系统级 PATH）"""
+    project = SCRIPT_DIR
+    bat = os.path.join(project, "bili-summary.bat")
+    try:
+        with open(bat, "w", encoding="ascii") as f:
+            f.write('@echo off\r\n"%%~dp0.venv\\Scripts\\bili-summary.exe" %%*\r\n')
+        print(f"   ✅ 已生成 {bat}")
+    except Exception as e:
+        print(f"   ❌ 生成 bili-summary.bat 失败: {e}")
+        return
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                             winreg.KEY_READ | winreg.KEY_SET_VALUE)
+        try:
+            cur, _ = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            cur = ""
+        parts = [p for p in cur.split(";") if p.strip()]
+        if project in parts:
+            print("   ✅ 项目目录已在用户 PATH 中")
+        else:
+            parts.append(project)
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
+            try:
+                import ctypes
+                ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0, 1000, None)
+            except Exception:
+                pass
+            print(f"   ✅ 已将 {project} 加入用户 PATH（新开 cmd 生效）")
+        winreg.CloseKey(key)
+        print("   ✅ 完成！新开 cmd 直接输入 bili-summary 即可")
+    except Exception as e:
+        print(f"   ⚠ 自动加入用户 PATH 失败: {e}")
+        print("      请手动: 设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → 用户变量 Path → 新建 → 粘贴:")
+        print(f"      {project}")
+
+
 def _hf_reachable():
     import urllib.request
     try:
@@ -912,7 +1003,7 @@ def setup_wizard(check_only=False):
     """一键配置向导：模型规格/缓存位置/API Key/镜像/预下载。只动项目目录与用户缓存，不碰系统"""
     global WHISPER_SIZE
     print("\n" + "=" * 56)
-    print("bili_summary 一键配置向导（只动本项目目录与用户缓存，不碰系统）")
+    print("bili_summary 一键配置向导（默认只动本项目目录；注册全局命令时会经你确认）")
     print("=" * 56)
 
     # 1) 环境检查
@@ -1040,10 +1131,14 @@ def setup_wizard(check_only=False):
     else:
         print("⚠️ 跳过模型预下载")
 
+    # 9) 注册全局命令 bili-summary（可选，经确认才改用户环境）
+    register_cli_cmd()
+
     print("\n" + "=" * 56)
     print("✅ 配置完成！使用示例:")
-    print("   python bili_summary.py -i                                 # 交互模式")
-    print("   python bili_summary.py BV1GJ411x7h7 --no-summary -o out    # 只转写")
+    print("   bili-summary -i                                     # 交互模式（已注册全局命令时）")
+    print("   python bili_summary.py -i                           # 未注册时也可这样运行")
+    print("   bili-summary BV1GJ411x7h7 --no-summary -o out        # 只转写")
     print("=" * 56)
 
 
@@ -1118,7 +1213,7 @@ def parse_args(argv):
     ap.add_argument("--dry-run", action="store_true",
                     help="只预览：显示归一化 URL、抓取视频标题与输出文件名（不下载/不转写/不调AI）")
     ap.add_argument("--setup", action="store_true",
-                    help="一键配置向导：API Key / 模型镜像 / 模型预下载（--setup --check 只读体检）")
+                    help="一键配置向导：硬件/并行/模型/API Key/镜像/预下载/注册 bili-summary 命令（--setup --check 只读体检）")
     ap.add_argument("--config", action="store_true",
                     help="交互式设置中心：菜单式查看/修改所有配置（即时写入 .env）")
     ap.add_argument("--show-config", action="store_true",

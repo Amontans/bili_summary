@@ -81,6 +81,16 @@ bili-summary -i
 
 GitHub 页面 → Code → Download ZIP → 解压后按方式 A 运行。
 
+### Windows 零基础快速开始（双击即可）
+
+1. 安装 [Python 3.9+](https://www.python.org/downloads/)：安装时**务必勾选 “Add python.exe to PATH”**；完成后 cmd 里 `python --version` 有输出即成功
+2. 安装 [VC++ 运行库 (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)（faster-whisper 依赖，缺了会报“无法加载 ctranslate2”或缺 DLL）
+3. 下载本项目：`git clone ...`，或 GitHub 页面 → Code → Download ZIP 后解压
+4. **双击 `start.bat`**（已处理好中文乱码、自动检测 Python），首次运行自动创建 `.venv` 并安装依赖（几百 MB，请耐心等待）
+5. 运行 `python bili_summary.py --setup` 一键配置（只转写可跳过 API Key）→ 之后输入链接即可
+
+> 不用启动器也行：cmd 里 `cd` 进项目目录后，所有 `python bili_summary.py ...` 命令照常可用。
+
 ---
 
 ## 🎛 一键配置：python bili_summary.py --setup
@@ -113,13 +123,14 @@ bili_summary 一键配置向导（只动本项目目录与用户缓存，不碰�
 
 **它会做什么 / 不会做什么**：
 
-| ✅ 只做（安全） | ❌ 绝不做 |
+| ✅ 只做（安全） | ❌ 绝不做（除非你明确确认） |
 |---|---|
 | 项目目录内创建 `.venv`（依赖自动安装） | 不修改 `~/.bashrc` / 系统环境变量 |
 | 项目目录内写 `.env` 配置文件（权限 600） | 不往项目外写任何文件 |
 | 模型下载到用户缓存 `~/.cache/huggingface`（可用 `HF_HOME` 自定义目录，可复用、可删） | 不强制安装任何系统软件 |
 | 自定义 Whisper 模型规格（tiny~large-v3 或本地路径）与模型缓存目录 | 不需要你输入 sudo |
 | 环境检查（`--setup --check` 只读体检） | 不需要你输入 sudo |
+| 注册 `bili-summary` 全局命令（向导末尾可选）：Linux/macOS 写 `~/.local/bin` 软链接，Windows 写用户 PATH + 项目目录内 `bili-summary.bat`——**会先征得你同意**，且不碰系统级设置 | — |
 
 > 说明：venv 与依赖在首次运行脚本时也会自动完成，`--setup` 额外处理 API Key、镜像地址、模型预下载三项。
 
