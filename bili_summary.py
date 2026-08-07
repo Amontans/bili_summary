@@ -999,6 +999,19 @@ def _hf_reachable():
         return False
 
 
+def _is_local_model_path(s):
+    """判断 WHISPER_SIZE 是否指向本地模型目录（而非 tiny/base/... 内置规格名）"""
+    s = (s or "").strip()
+    if not s:
+        return False
+    p = os.path.expanduser(s)
+    if os.path.isdir(p) or os.path.exists(p):
+        return True
+    if s.startswith((".", "/", "\\", "~")) or re.match(r"^[A-Za-z]:[\\/]", s):
+        return True
+    return False
+
+
 def setup_wizard(check_only=False):
     """一键配置向导：模型规格/缓存位置/API Key/镜像/预下载。只动项目目录与用户缓存，不碰系统"""
     global WHISPER_SIZE
@@ -1053,37 +1066,70 @@ def setup_wizard(check_only=False):
         set_env_value(env_file, "BILI_PARALLEL", ans)
         print(f"✅ BILI_PARALLEL = {ans}（已写入 {env_file}）")
 
-    # 4) Whisper 模型规格（可自定义：内置规格或本地模型目录路径）
-    print("\n🧠 Whisper 模型规格（音频转文字的核心模型）")
-    print("   内置可选: tiny / base / small / medium / large-v3（越大越准、越慢、越吃内存）")
-    print("   也可输入本地模型目录的绝对路径（faster-whisper 直接加载该路径，跳过下载）")
-    cur_size = os.environ.get("WHISPER_SIZE", "small")
+    # 4) Whisper 模型来源（大文件，明确询问：在线下载 / 本地已安装）
+    print("\n🧠 Whisper 转写模型（核心大文件，约数百 MB）")
+    print("   [1] 在线下载：自动从 HuggingFace/镜像拉取（规格与存放位置下面两步选）")
+    print("   [2] 使用本地已安装模型：填目录路径直接调用，不下载")
     try:
-        ans = input(f"   当前 [{cur_size}]，直接回车保留，或输入新规格/路径: ").strip()
+        src = input("   请选择 [1/2]，回车=在线下载: ").strip()
     except (EOFError, KeyboardInterrupt):
-        ans = ""
-    if ans:
-        WHISPER_SIZE = ans
-        os.environ["WHISPER_SIZE"] = ans
-        set_env_value(env_file, "WHISPER_SIZE", ans)
-        print(f"✅ WHISPER_SIZE = {ans}（已写入 {env_file}）")
-    else:
-        print(f"✅ 保留 WHISPER_SIZE = {cur_size}")
+        src = ""
+    if src == "2":
+        path = input("   输入本地模型目录绝对路径（如 D:\\models\\whisper-large-v3）: ").strip()
+        if path:
+            WHISPER_SIZE = path
+            os.environ["WHISPER_SIZE"] = path
+            set_env_value(env_file, "WHISPER_SIZE", path)
+            print(f"✅ 已设置 WHISPER_SIZE = {path}（转写时直接加载，不再下载）")
+        else:
+            print("⚠️ 未输入路径，回退为在线下载（下一步选规格）")
+            src = ""
+    if src != "2":
+        print("   在线下载规格: tiny / base / small / medium / large-v3（越大越准、越慢、越吃内存）")
+        cur_size = os.environ.get("WHISPER_SIZE", "small")
+        try:
+            ans = input(f"   当前 [{cur_size}]，回车保留，或输入新规格: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans:
+            WHISPER_SIZE = ans
+            os.environ["WHISPER_SIZE"] = ans
+            set_env_value(env_file, "WHISPER_SIZE", ans)
+            print(f"✅ WHISPER_SIZE = {ans}（已写入 {env_file}）")
+        else:
+            print(f"✅ 保留 WHISPER_SIZE = {cur_size}")
 
-    # 5) 模型缓存位置（默认 ~/.cache/huggingface，可自由指定目录）
-    print("\n📂 Whisper 模型缓存位置（模型下载后存放的目录）")
+    # 5) 模型缓存位置（仅在线下载需要：默认 / 项目内 / 自定义）
+    print("\n📂 模型缓存位置（在线下载的模型存放目录）")
+    print("   [1] 用户缓存（默认）: ~/.cache/huggingface —— 跨项目复用")
+    print("   [2] 项目内: models/ —— 随项目走，拷项目即带走模型")
+    print("   [3] 自定义目录")
     cur_hf = os.environ.get("HF_HOME")
-    hint = f"当前 [{cur_hf}]" if cur_hf else "当前 [默认 ~/.cache/huggingface]"
+    if cur_hf:
+        print(f"   当前: {cur_hf}")
     try:
-        ans = input(f"   {hint}，直接回车保留，或输入新目录（如 D:\\models 或 ~/models）: ").strip()
+        ans = input("   选择 [1/2/3]，回车保留当前: ").strip()
     except (EOFError, KeyboardInterrupt):
         ans = ""
-    if ans:
-        set_env_value(env_file, "HF_HOME", ans)
-        os.environ["HF_HOME"] = ans
-        print(f"✅ HF_HOME = {ans}（已写入 {env_file}，模型将缓存到该目录）")
+    if ans == "1":
+        remove_env_key(env_file, "HF_HOME")
+        os.environ.pop("HF_HOME", None)
+        print("✅ 使用默认缓存 ~/.cache/huggingface（跨项目复用）")
+    elif ans == "2":
+        val = os.path.join(SCRIPT_DIR, "models")
+        set_env_value(env_file, "HF_HOME", val)
+        os.environ["HF_HOME"] = val
+        print(f"✅ 模型将缓存到项目内: {val}")
+    elif ans == "3":
+        val = input("   输入缓存目录绝对路径（如 D:\\models_cache）: ").strip()
+        if val:
+            set_env_value(env_file, "HF_HOME", val)
+            os.environ["HF_HOME"] = val
+            print(f"✅ HF_HOME = {val}（已写入 {env_file}）")
+        else:
+            print("⚠️ 未输入，保留当前缓存位置")
     else:
-        print("✅ 使用默认缓存位置（~/.cache/huggingface）")
+        print("   保留当前缓存位置")
 
     # 6) DeepSeek API Key（仅总结模式需要）
     print("\n🔑 DeepSeek API Key（仅“转写+AI总结”模式需要；只转写可回车跳过）")
@@ -1113,23 +1159,29 @@ def setup_wizard(check_only=False):
         os.chmod(env_file, 0o600)
         print(f"✅ 配置文件: {env_file}（权限 600，仅本用户可读）")
 
-    # 8) Whisper 模型预下载（按所选规格，仅首次）
-    print(f"\n⬇️ 预下载 Whisper {WHISPER_SIZE} 模型（约数百 MB；不下载则首次转写时自动下载）")
-    print("   若 WHISPER_SIZE 填的是本地路径，此步会直接验证该路径可用性")
-    try:
-        ans = input("   现在下载吗？[y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        ans = ""
-    if ans in ("y", "yes"):
-        ensure_model_endpoint()
-        print("   下载中，请耐心等待...")
-        try:
-            load_model()
-            print(f"✅ Whisper {WHISPER_SIZE} 模型就绪（缓存于 {os.environ.get('HF_HOME', '~/.cache/huggingface')}）")
-        except Exception as e:
-            print(f"⚠️ 模型预下载失败: {e}（可重跑 --setup 或首次转写时自动下载）")
+    # 8) 模型预下载（本地已安装模型则验证跳过；在线规格才询问下载）
+    if _is_local_model_path(WHISPER_SIZE):
+        p = os.path.expanduser(WHISPER_SIZE)
+        if os.path.isdir(p):
+            print(f"✅ 使用本地已安装模型: {p}（目录存在，转写时直接加载，无需下载）")
+        else:
+            print(f"⚠️ 本地模型路径不存在: {p}，请确认（转写时会报错；可重跑 --setup 改回在线下载）")
     else:
-        print("⚠️ 跳过模型预下载")
+        print(f"\n⬇️ 预下载 Whisper {WHISPER_SIZE} 模型（约数百 MB；不下载则首次转写时自动下载）")
+        try:
+            ans = input("   现在下载吗？[y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans in ("y", "yes"):
+            ensure_model_endpoint()
+            print("   下载中，请耐心等待...")
+            try:
+                load_model()
+                print(f"✅ Whisper {WHISPER_SIZE} 模型就绪（存放于 {os.environ.get('HF_HOME', '~/.cache/huggingface')}）")
+            except Exception as e:
+                print(f"⚠️ 模型预下载失败: {e}（可重跑 --setup 或首次转写时自动下载）")
+        else:
+            print("⚠️ 跳过模型预下载（首次转写时会自动下载）")
 
     # 9) 注册全局命令 bili-summary（可选，经确认才改用户环境）
     register_cli_cmd()

@@ -95,7 +95,7 @@ GitHub 页面 → Code → Download ZIP → 解压后按方式 A 运行。
 
 ## 🎛 一键配置：python bili_summary.py --setup
 
-像安装向导一样交互式完成配置（**安全边界：只动本项目目录与用户缓存，不碰系统**）：
+像安装向导一样交互式完成配置（**默认只动本项目目录与用户缓存；注册全局命令时会先征得你同意**）：
 
 ```text
 $ python bili_summary.py --setup
@@ -107,6 +107,19 @@ bili_summary 一键配置向导（只动本项目目录与用户缓存，不碰�
 ✅ ffmpeg: /usr/bin/ffmpeg
 ✅ 依赖齐全 (yt-dlp / faster-whisper / openai / imageio-ffmpeg)
 
+🧠 Whisper 转写模型（核心大文件，约数百 MB）
+   [1] 在线下载：自动从 HuggingFace/镜像拉取（规格与存放位置下面两步选）
+   [2] 使用本地已安装模型：填目录路径直接调用，不下载
+   请选择 [1/2]，回车=在线下载: 1
+   在线下载规格: tiny / base / small / medium / large-v3（越大越准、越慢、越吃内存）
+   当前 [small]，回车保留，或输入新规格: 
+
+📂 模型缓存位置（在线下载的模型存放目录）
+   [1] 用户缓存（默认）: ~/.cache/huggingface —— 跨项目复用
+   [2] 项目内: models/ —— 随项目走，拷项目即带走模型
+   [3] 自定义目录
+   选择 [1/2/3]，回车保留当前: 1
+
 🔑 DeepSeek API Key（仅“转写+AI总结”模式需要；只转写可回车跳过）
    请输入 API Key（回车跳过）: sk-xxxx
 ✅ DEEPSEEK_API_KEY 已写入 /path/bili_summary/.env
@@ -115,7 +128,11 @@ bili_summary 一键配置向导（只动本项目目录与用户缓存，不碰�
 
 ⬇️ 预下载 Whisper small 模型（约 460MB；不下载则首次转写时自动下载）
    现在下载吗？[y/N] y
-✅ Whisper small 模型就绪（缓存于 ~/.cache/huggingface）
+✅ Whisper small 模型就绪（存放于 ~/.cache/huggingface）
+
+⌨️ 注册全局命令 bili-summary（之后直接敲 bili-summary，不再需要 python bili_summary.py）
+   现在注册吗？[y/N] y
+✅ 完成！新开终端直接输入 bili-summary 即可
 
 ✅ 配置完成！
 ========================================================
@@ -314,8 +331,8 @@ Debian/Ubuntu 可能需要先装 `python3-venv`（`sudo apt install python3-venv
 **Q: 模型下载很慢或失败？**
 脚本会自动切换 hf-mirror.com 镜像；也可手动 `export HF_ENDPOINT=https://hf-mirror.com`。模型只需下载一次，缓存于 `~/.cache/huggingface`。
 
-**Q: 想把模型放到别的位置（如 D 盘）？**
-运行 `python bili_summary.py --setup`，在“模型缓存位置”一步输入新目录即可（写入 `.env` 的 `HF_HOME`）；也可手动设置：Windows `set HF_HOME=D:\models`，Linux `export HF_HOME=~/models`。换规格同理：`WHISPER_SIZE` 填 tiny/base/small/medium/large-v3，或直接填本地模型目录路径。
+**Q: 模型（几百 MB 的大文件）放哪里？怎么用已下载好的模型？**
+运行 `python bili_summary.py --setup`：在“Whisper 转写模型”一步选 `[1] 在线下载`（随后在“模型缓存位置”选默认 `~/.cache/huggingface` / 项目内 `models/` / 自定义目录），或选 `[2] 使用本地已安装模型` 直接填目录路径（如 `D:\models\whisper-large-v3`），脚本会直接加载、不再下载。也可手动改 `.env`：`HF_HOME` 控制缓存目录，`WHISPER_SIZE` 填本地路径即跳过下载。小文件（venv 与依赖）始终安装在项目内 `.venv`，无需选择。
 
 **Q: 转写结果为空或过短？**
 纯音乐、无人声视频无法转写属正常；中文识别失败会自动用自动语种重试一遍。
