@@ -21,6 +21,7 @@
 - ✅ **零配置自举**：首次运行自动创建 `.venv` 并安装依赖，**下载即用**
 - ✅ **可 pip 安装**：`pip install .` 或 `pip install git+...` 后获得 `bili-summary` 命令
 - ✅ **跨平台**：Linux / macOS / Windows
+- ✅ **交互式设置中心**：`--config` 像 pi agent 一样菜单式查看/修改全部配置（即时写入 `.env`，下次运行生效）；`--show-config` 只读查看当前生效值与来源
 - ✅ **GPU 自动加速**：检测到 NVIDIA 显卡自动启用 CUDA+float16，无需手动配置；想关掉在 `.env` 设 `WHISPER_DEVICE=cpu` 即可
 - ✅ **并行默认自动**：按 CPU 核数自动开启（上限 4 路，GPU 默认单路）；`-p 1` 或 `BILI_PARALLEL=1` 可手动关闭
 - ✅ **并行流水线**：下载预取与转写重叠，不再“下完一个才下下一个”；`-p N` 多路并行转写（CPU 线程自动分摊）
@@ -162,6 +163,8 @@ $ python bili_summary.py
   --keep-links      交互模式结束后保留 links.txt（默认自动删除）
   --dry-run         只预览：显示归一化 URL、抓取视频标题与输出文件名（不下载/不转写/不调AI）
   --setup           一键配置向导（API Key / 模型镜像 / 模型预下载）
+  --config          交互式设置中心：菜单式查看/修改所有配置（即时写入 .env）
+  --show-config     只读显示当前生效的配置（含来源: 环境变量/.env/默认）
   --check           只读环境检查（配合 --setup 使用）
   -V, --version     显示版本
 ```
@@ -225,6 +228,40 @@ python bili_summary.py -f links.txt --no-summary -o transcripts
 - 运行时产生的 `__pycache__`
 
 输出目录 `output/` 里的转写/总结文件是产物，按你的 `-o` 指定存放，不会被误删。
+
+### 交互式设置中心（--config，推荐日常改设置用）
+
+像 pi agent 一样边看边改，所有修改即时写入 `.env`，下次运行生效：
+
+```text
+$ python bili_summary.py --config
+
+⚙️  bili_summary 设置中心（修改即时写入 .env，下次运行生效）
+    优先级: 命令行参数 > 真实环境变量 > .env > 默认
+
+当前配置：
+   1. DeepSeek API Key    sk-ca***180c  [环境变量]
+   2. 总结主模型           deepseek-chat
+   3. 总结备用模型          deepseek-reasoner
+   4. 转写模型规格          small
+   5. 推理设备             自动(cuda)          ← GPU 自动加速
+   6. 量化类型             float16
+   7. 并行转写路数          auto（→1路）          ← 并行默认自动
+   8. 生成 .srt 字幕       关
+   9. 断点续传             关
+  10. 只转写不调AI          关
+  11. 模型镜像地址          https://hf-mirror.com  [.env]
+  12. 模型缓存位置          ~/.cache/huggingface
+  13. 默认输出目录          ./output
+  ----------------------------------------------
+  14. 💾 完成（退出）
+
+  输入编号修改，回车重显，q 退出: 4
+```
+
+- 每个条目标注来源（`[环境变量]` / `[.env]` / 默认），改了当场生效并落盘
+- 想看当前配置而不改动：`python bili_summary.py --show-config`
+- `--setup` 是首次初始化向导（含模型预下载），`--config` 是日常改设置的菜单，两者互补
 
 ### 环境变量与 .env 配置
 

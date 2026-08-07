@@ -16,6 +16,8 @@ bili_summary.py — B站视频一键转文字稿 + AI 总结（支持多链接�
   python bili_summary.py -p 2 -f links.txt                  # 并行：下载预取与转写重叠，2 路同时转写
   python bili_summary.py --skip-existing -f links.txt       # 断点续传：已转写过的视频直接跳过
   python bili_summary.py --with-timestamps BV1xx...         # 额外生成带时间戳的 .srt 字幕
+  python bili_summary.py --config                            # 交互式设置中心（菜单式改配置，写入 .env）
+  python bili_summary.py --show-config                       # 只读显示当前生效配置
 
 安装方式（GitHub）:
   git clone 后直接运行（自动创建 .venv 并安装依赖）；或 pip install . 安装为 bili-summary 命令
@@ -143,6 +145,7 @@ def ensure_deps():
 
 ensure_deps()
 
+_REAL_ENV = set(os.environ)                       # 进程自带的真实环境变量（不含 .env 注入，供配置来源判定）
 load_env_file(os.path.join(SCRIPT_DIR, ".env"))   # 加载项目目录下的 .env（真实环境变量优先）
 
 # ============ 配置 ============
@@ -162,10 +165,11 @@ def cfg_flag(key):
 
 def detect_best_device():
     """自动硬件加速：检测到 NVIDIA GPU → cuda+float16；否则 CPU+int8。
-    手动关闭：.env/环境变量设 WHISPER_DEVICE=cpu（强制 CPU）；设 cuda 则强制 GPU"""
+    手动关闭：.env/环境变量设 WHISPER_DEVICE=cpu（强制 CPU）；设 cuda 则强制 GPU；auto=自动探测"""
     global DEVICE, COMPUTE_TYPE
-    if os.environ.get("WHISPER_DEVICE"):               # 用户已显式指定，尊重之
-        DEVICE = os.environ["WHISPER_DEVICE"]
+    explicit = os.environ.get("WHISPER_DEVICE", "").strip().lower()
+    if explicit and explicit != "auto":            # 用户已显式指定（cpu/cuda），尊重之
+        DEVICE = explicit
         if os.environ.get("WHISPER_COMPUTE_TYPE"):
             COMPUTE_TYPE = os.environ["WHISPER_COMPUTE_TYPE"]
         return
@@ -199,6 +203,177 @@ def resolve_parallel(cli_value):
         return 1
     cores = os.cpu_count() or 4
     return min(4, max(1, (cores + 1) // 2))
+
+
+# ============ 交互式设置中心（--config / --show-config） ============
+# (key, 显示名, 类型, 说明, 枚举选项)
+SETTING_ITEMS = [
+    ("DEEPSEEK_API_KEY",      "DeepSeek API Key",   "secret",  "转写+AI总结模式需要；只转写可留空", None),
+    ("DEEPSEEK_MODEL",        "总结主模型",         "string",  "如 deepseek-chat", None),
+    ("DEEPSEEK_MODEL_FALLBACK", "总结备用模型",    "string",  "主模型失败时回退", None),
+    ("WHISPER_SIZE",          "转写模型规格",       "enum",    "tiny/base/small/medium/large-v3 或本地路径",
+     ["tiny", "base", "small", "medium", "large-v3"]),
+    ("WHISPER_DEVICE",        "推理设备",           "enum",    "auto=自动探测GPU(推荐)；cpu=关闭GPU；cuda=强制GPU",
+     ["auto", "cpu", "cuda"]),
+    ("WHISPER_COMPUTE_TYPE",  "量化类型",           "enum",    "GPU 用 float16，CPU 用 int8", ["int8", "float16", "float32"]),
+    ("BILI_PARALLEL",         "并行转写路数",       "parallel", "auto/N；1=关闭并行", None),
+    ("BILI_WITH_TIMESTAMPS",  "生成 .srt 字幕",     "bool",    "每个视频额外输出带时间戳字幕", None),
+    ("BILI_SKIP_EXISTING",    "断点续传",           "bool",    "已转写过的视频自动跳过", None),
+    ("BILI_NO_SUMMARY",       "只转写不调AI",       "bool",    "无需 API Key", None),
+    ("HF_ENDPOINT",           "模型镜像地址",       "string",  "留空=自动探测（大陆建议 hf-mirror.com）", None),
+    ("HF_HOME",               "模型缓存位置",       "string",  "留空=~/.cache/huggingface", None),
+    ("BILI_OUTPUT_DIR",       "默认输出目录",       "string",  "留空=./output", None),
+]
+
+
+def _mask_key(v):
+    """API Key 打码显示"""
+    if not v or v.startswith("sk-xxx"):
+        return "未配置"
+    return v[:5] + "***" + v[-4:]
+
+
+def _env_source(key):
+    """配置来源: 真实环境变量 / .env 文件 / 默认值"""
+    if key in _REAL_ENV:
+        return "环境变量"
+    env_file = os.path.join(SCRIPT_DIR, ".env")
+    if os.path.exists(env_file):
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith(key + "="):
+                    return ".env"
+    return "默认"
+
+
+def _display_value(item):
+    """按类型显示当前生效值（含代码默认值）"""
+    key, name, typ, hint, _ = item
+    val = os.environ.get(key, "")
+    if typ == "secret":
+        return _mask_key(val or "")
+    if typ == "bool":
+        eff = val or "0"
+        return "开 ✅" if eff.lower() in ("1", "true", "yes", "on") else "关"
+    if key == "WHISPER_DEVICE":
+        return val or f"自动({DEVICE})"
+    if key == "BILI_PARALLEL":
+        eff = val or "auto"
+        return eff + (f"（→{resolve_parallel(None)}路）" if eff.lower() == "auto" else "")
+    if key == "DEEPSEEK_MODEL":
+        return val or "deepseek-chat"
+    if key == "DEEPSEEK_MODEL_FALLBACK":
+        return val or "deepseek-reasoner"
+    if key == "WHISPER_SIZE":
+        return val or "small"
+    if key == "WHISPER_COMPUTE_TYPE":
+        return val or "int8"
+    if key == "BILI_OUTPUT_DIR":
+        return val or "./output"
+    if key == "HF_HOME":
+        return val or "~/.cache/huggingface"
+    if key == "HF_ENDPOINT":
+        return val or "自动探测"
+    return val or "（默认）"
+
+
+def _edit_item(item):
+    """修改单个配置项：即时写入 .env 并更新内存（含设备/并行联动）"""
+    global DEVICE, COMPUTE_TYPE
+    key, name, typ, hint, choices = item
+    env_file = os.path.join(SCRIPT_DIR, ".env")
+    cur = os.environ.get(key, "")
+    print(f"\n▶ 修改「{name}」（{hint}）")
+    print(f"   当前: {_display_value(item)}")
+    if typ == "enum":
+        for i, c in enumerate(choices, 1):
+            mark = "  ← 当前" if c == cur else ""
+            print(f"     {i}. {c}{mark}")
+        ans = input("   选择编号，或输入自定义值，回车保留: ").strip()
+        if not ans:
+            return
+        if ans.isdigit() and 1 <= int(ans) <= len(choices):
+            val = choices[int(ans) - 1]
+        else:
+            val = ans
+    elif typ == "bool":
+        ans = input("   0=关 1=开（回车保留）: ").strip().lower()
+        if not ans:
+            return
+        val = "1" if ans in ("1", "y", "yes", "on") else "0"
+    elif typ == "parallel":
+        ans = input("   auto 或数字（1=关闭并行，回车保留）: ").strip()
+        if not ans:
+            return
+        val = ans
+    else:   # secret / string
+        ans = input("   输入新值（回车保留；输入 del 清空恢复默认）: ").strip()
+        if not ans:
+            return
+        if ans.lower() == "del":
+            remove_env_key(env_file, key)
+            os.environ.pop(key, None)
+            print(f"   ✅ {key} 已清空（恢复默认）")
+            return
+        val = ans
+    set_env_value(env_file, key, val)
+    os.environ[key] = val
+    if key == "WHISPER_DEVICE":                       # 同步本会话的全局设备状态
+        DEVICE = val
+        COMPUTE_TYPE = "float16" if val == "cuda" else "int8"
+    elif key == "WHISPER_COMPUTE_TYPE":
+        COMPUTE_TYPE = val
+    print(f"   ✅ {key} = {val} 已写入 {env_file}")
+
+
+def settings_menu():
+    """⚙️ 交互式设置中心：pi 式菜单，逐项查看/修改，即时写入 .env"""
+    detect_best_device()   # 与运行态保持一致
+    print("\n" + "=" * 56)
+    print("⚙️  bili_summary 设置中心（修改即时写入 .env，下次运行生效）")
+    print("    优先级: 命令行参数 > 真实环境变量 > .env > 默认")
+    print("=" * 56)
+    while True:
+        print("\n当前配置：")
+        for i, item in enumerate(SETTING_ITEMS, 1):
+            key = item[0]
+            src = _env_source(key)
+            flag = "" if src == "默认" else f"  [{src}]"
+            print(f"  {i:>2}. {item[1]:<18} {_display_value(item)}{flag}")
+        print("  " + "-" * 46)
+        print(f"  {len(SETTING_ITEMS) + 1:>2}. 💾 完成（退出）")
+        try:
+            ans = input("\n  输入编号修改，回车重显，q 退出: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if ans.lower() in ("q", "quit", "exit"):
+            break
+        if not ans:
+            continue
+        if ans.isdigit():
+            n = int(ans)
+            if 1 <= n <= len(SETTING_ITEMS):
+                _edit_item(SETTING_ITEMS[n - 1])
+                continue
+            if n == len(SETTING_ITEMS) + 1:
+                break
+        print("  ⚠ 无法识别，请输入列表中的编号或 q")
+    print("\n✅ 设置已保存到 .env（下次运行生效；命令行参数可临时覆盖）")
+
+
+def show_config():
+    """只读显示当前生效配置（--show-config）"""
+    detect_best_device()
+    print("\n" + "=" * 56)
+    print("📋 bili_summary 当前生效配置（优先级: 环境变量 > .env > 默认）")
+    print("=" * 56)
+    for item in SETTING_ITEMS:
+        key, name, typ, hint, _ = item
+        print(f"  {name:<18} {_display_value(item):<20} [{_env_source(key)}]")
+    print(f"  {'生效设备':<18} {DEVICE}/{COMPUTE_TYPE}")
+    print(f"  {'并行路数':<18} {resolve_parallel(None)}")
+    print("=" * 56)
 CHUNK_LEN = 20000                      # 分段长度(字)
 SPLIT_THRESHOLD = 30000                # 超过此长度才分段
 TRANS_TIMEOUT = 7200                   # 转写超时(秒)，仅兜底防卡死
@@ -944,6 +1119,10 @@ def parse_args(argv):
                     help="只预览：显示归一化 URL、抓取视频标题与输出文件名（不下载/不转写/不调AI）")
     ap.add_argument("--setup", action="store_true",
                     help="一键配置向导：API Key / 模型镜像 / 模型预下载（--setup --check 只读体检）")
+    ap.add_argument("--config", action="store_true",
+                    help="交互式设置中心：菜单式查看/修改所有配置（即时写入 .env）")
+    ap.add_argument("--show-config", action="store_true",
+                    help="只读显示当前生效的配置（来源: 环境变量/.env/默认）")
     ap.add_argument("--check", action="store_true", help="只读环境检查（配合 --setup 使用）")
     ap.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     return ap.parse_args(argv)
@@ -1073,6 +1252,12 @@ def main():
     args.with_timestamps = args.with_timestamps if args.with_timestamps is not None else cfg_flag("BILI_WITH_TIMESTAMPS")
     if args.setup:
         setup_wizard(check_only=args.check)
+        sys.exit(0)
+    if args.show_config:
+        show_config()
+        sys.exit(0)
+    if args.config:
+        settings_menu()
         sys.exit(0)
     links = collect_inputs(args)
     links_file = None   # 交互模式生成的 links.txt（退出时自动删除）
