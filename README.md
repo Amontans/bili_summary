@@ -226,7 +226,7 @@ python bili_summary.py -f links.txt --no-summary -o transcripts
 | `DEEPSEEK_API_KEY` | DeepSeek API Key，**仅总结模式需要** | - |
 | `DEEPSEEK_BASE_URL` | DeepSeek API 地址 | `https://api.deepseek.com/v1` |
 | `DEEPSEEK_MODEL` | 总结主模型 | `deepseek-chat` |
-| `DEEPSEEK_MODEL_FALLBACK` | 主模型失败时的备用模型 | `deepseek-v4-pro` |
+| `DEEPSEEK_MODEL_FALLBACK` | 主模型失败时的备用模型 | `deepseek-reasoner` |
 | `WHISPER_SIZE` | Whisper 模型规格：`tiny`/`base`/`small`/`medium`/`large-v3`，或本地模型目录绝对路径（跳过下载直接加载） | `small` |
 | `WHISPER_DEVICE` | 推理设备 | `cpu` |
 | `WHISPER_COMPUTE_TYPE` | 量化类型 | `int8` |
@@ -290,7 +290,7 @@ bili_summary/
 | 转码 | ffmpeg → mp3（失败降级用原格式） |
 | 转写 | faster-whisper `small` 模型，CPU/int8；中文+VAD 优先，失败自动切自动语种 |
 | 分段 | 超过 30000 字按 20000 字切分（句末断开），仅供总结模式使用 |
-| 总结（可选） | DeepSeek `deepseek-chat`（失败回退 `deepseek-v4-pro`），temperature 0.3，500 字内，长文 map-reduce 分层合并 |
+| 总结（可选） | DeepSeek `deepseek-chat`（失败回退 `deepseek-reasoner`），temperature 0.3，500 字内，长文 map-reduce 分层合并 |
 
 ## 📄 许可
 

@@ -83,7 +83,7 @@ def _venv_ok(python_bin):
     code = ("import importlib.util,sys;"
             "sys.exit(0 if all(importlib.util.find_spec(m) for m in %r) else 1)" % names)
     try:
-        return subprocess.run([python_bin, "-c", code], capture_output=True).returncode == 0
+        return subprocess.run([python_bin, "-c", code], capture_output=True, timeout=30).returncode == 0
     except Exception:
         return False
 
@@ -120,7 +120,12 @@ def ensure_deps():
     subprocess.run([sys.executable, "-m", "venv", VENV_DIR], check=True)
     vpy = _venv_python(VENV_DIR)
     subprocess.run([vpy, "-m", "pip", "install", "-q", "--upgrade", "pip"], check=True)
-    subprocess.run([vpy, "-m", "pip", "install", "-q"] + REQUIREMENTS, check=True)
+    log("正在安装依赖（首次需下载数百 MB，请耐心等待；失败会自动重试）...")
+    try:
+        subprocess.run([vpy, "-m", "pip", "install", "-q"] + REQUIREMENTS, check=True)
+    except subprocess.CalledProcessError:
+        log("依赖安装失败，正在重试一次...")
+        subprocess.run([vpy, "-m", "pip", "install", "-q"] + REQUIREMENTS, check=True)
     log("依赖安装完成 ✅，自动重启脚本...")
     os.execv(vpy, [vpy] + sys.argv)
 
@@ -133,7 +138,7 @@ load_env_file(os.path.join(SCRIPT_DIR, ".env"))   # 加载项目目录下的 .en
 API_KEY   = os.environ.get("DEEPSEEK_API_KEY", "sk-xxxxxxxxxxxxxxxx")
 BASE_URL  = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 MODEL     = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")          # 主模型；失败时自动回退
-MODEL_FB  = os.environ.get("DEEPSEEK_MODEL_FALLBACK", "deepseek-v4-pro")
+MODEL_FB  = os.environ.get("DEEPSEEK_MODEL_FALLBACK", "deepseek-reasoner")
 WHISPER_SIZE = os.environ.get("WHISPER_SIZE", "small")                 # small 模型
 DEVICE    = os.environ.get("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")          # CPU 量化计算
@@ -223,7 +228,7 @@ def download_audio(url, outdir):
     mp3 = os.path.join(outdir, "audio.mp3")
     cmd = [ffmpeg, "-y", "-i", audio, "-vn", "-acodec", "libmp3lame", "-q:a", "0", mp3]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=900)
         audio = mp3
     except Exception as e:
         log(f"⚠ 转 mp3 失败（{e}），直接使用原音频格式: {os.path.basename(audio)}")
@@ -378,14 +383,21 @@ def vid_key(text):
     return re.sub(r"[^\w\-]+", "_", text)[:60]
 
 
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}   # Windows 保留设备名
+
+
 def sanitize_title(title):
-    """视频标题 → 安全文件名：去非法字符、压缩空白、去首尾点/空格、截断 80 字；空则返回 None"""
+    """视频标题 → 安全文件名：去非法字符、压缩空白、去首尾点/空格、规避 Windows 保留名、截断 80 字；空则返回 None"""
     t = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "", title)   # Windows 非法字符 + 控制字符
     t = re.sub(r"\s+", " ", t).strip()
     t = t.strip(". ")
     if not t:
         return None
-    return t[:80]
+    t = t[:80]
+    # Windows 下 CON/PRN/AUX/NUL/COM1-9/LPT1-9（含 CON.txt 等带扩展名形式）无法创建，加前缀规避
+    if t.split(".")[0].upper() in _WIN_RESERVED:
+        t = "_" + t
+    return t
 
 
 def make_output_name(title, key, used):
