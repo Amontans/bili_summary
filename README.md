@@ -38,7 +38,7 @@
 ### 方式 A：直接下载运行（推荐，零依赖）
 
 ```bash
-git clone https://github.com/你的用户名/bili_summary.git
+git clone https://github.com/Amontans/bili_summary.git
 cd bili_summary
 python bili_summary.py --setup     # 一键配置：API Key、镜像地址、模型预下载
 python bili_summary.py BV1GJ411x7h7 --no-summary
@@ -50,7 +50,7 @@ python bili_summary.py BV1GJ411x7h7 --no-summary
 ### 方式 B：pip 安装
 
 ```bash
-pip install git+https://github.com/你的用户名/bili_summary.git
+pip install git+https://github.com/Amontans/bili_summary.git
 # 之后直接使用命令（不再需要 python + 文件名）：
 bili-summary BV1GJ411x7h7 --no-summary
 ```
