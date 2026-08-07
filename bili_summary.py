@@ -153,6 +153,52 @@ MODEL_FB  = os.environ.get("DEEPSEEK_MODEL_FALLBACK", "deepseek-reasoner")
 WHISPER_SIZE = os.environ.get("WHISPER_SIZE", "small")                 # small 模型
 DEVICE    = os.environ.get("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")          # CPU 量化计算
+
+# ---- 自动硬件/并行探测与配置读取（可在 .env 或环境变量中手动覆盖）----
+def cfg_flag(key):
+    """读取 .env/环境变量中的开关（1/true/yes/on 视为开）"""
+    return os.environ.get(key, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def detect_best_device():
+    """自动硬件加速：检测到 NVIDIA GPU → cuda+float16；否则 CPU+int8。
+    手动关闭：.env/环境变量设 WHISPER_DEVICE=cpu（强制 CPU）；设 cuda 则强制 GPU"""
+    global DEVICE, COMPUTE_TYPE
+    if os.environ.get("WHISPER_DEVICE"):               # 用户已显式指定，尊重之
+        DEVICE = os.environ["WHISPER_DEVICE"]
+        if os.environ.get("WHISPER_COMPUTE_TYPE"):
+            COMPUTE_TYPE = os.environ["WHISPER_COMPUTE_TYPE"]
+        return
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            DEVICE, COMPUTE_TYPE = "cuda", "float16"
+            os.environ["WHISPER_DEVICE"] = DEVICE
+            os.environ["WHISPER_COMPUTE_TYPE"] = COMPUTE_TYPE
+            log("🖥️ 检测到 NVIDIA GPU，已自动启用 CUDA 加速（float16）；如需关闭：.env 设 WHISPER_DEVICE=cpu")
+        else:
+            log("💻 未检测到 GPU，使用 CPU（int8）；有 NVIDIA 显卡可设 WHISPER_DEVICE=cuda 手动开启")
+    except Exception:
+        log("💻 GPU 检测不可用，使用 CPU（int8）")
+
+
+def resolve_parallel(cli_value):
+    """并行路数：命令行显式 > 配置文件 BILI_PARALLEL > 自动（CPU 按核数上限4；GPU 默认单路）。
+    手动关闭并行：-p 1 或 .env 设 BILI_PARALLEL=1"""
+    if cli_value is not None and cli_value > 0:
+        return cli_value
+    cfg = os.environ.get("BILI_PARALLEL", "").strip().lower()
+    if cfg and cfg != "auto":
+        try:
+            v = int(cfg)
+            if v > 0:
+                return v
+        except ValueError:
+            log(f"⚠ BILI_PARALLEL 值 {cfg} 无法识别，改用自动")
+    if DEVICE == "cuda":
+        return 1
+    cores = os.cpu_count() or 4
+    return min(4, max(1, (cores + 1) // 2))
 CHUNK_LEN = 20000                      # 分段长度(字)
 SPLIT_THRESHOLD = 30000                # 超过此长度才分段
 TRANS_TIMEOUT = 7200                   # 转写超时(秒)，仅兜底防卡死
@@ -668,6 +714,16 @@ def set_env_value(path, key, value):
             f.write(f"{key}={value}\n")
 
 
+def remove_env_key(path, key):
+    """从 .env 中删除某个键（保留其他行）"""
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(ln for ln in lines if not ln.strip().startswith(key + "="))
+
+
 def _hf_reachable():
     import urllib.request
     try:
@@ -701,7 +757,37 @@ def setup_wizard(check_only=False):
 
     env_file = os.path.join(SCRIPT_DIR, ".env")
 
-    # 2) Whisper 模型规格（可自定义：内置规格或本地模型目录路径）
+    # 2) 硬件加速（GPU 自动 / 强制 CPU）
+    print("\n🖥️ 硬件加速（GPU 默认自动开启）")
+    print(f"   当前: 自动（{DEVICE}/{COMPUTE_TYPE}）")
+    print("   [1] 自动（推荐）：有 NVIDIA GPU 用 CUDA+float16，否则 CPU+int8")
+    print("   [2] 强制 CPU（关闭 GPU 加速）")
+    try:
+        ans = input("   请选择 [1/2]，回车保留: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    if ans == "2":
+        set_env_value(env_file, "WHISPER_DEVICE", "cpu")
+        set_env_value(env_file, "WHISPER_COMPUTE_TYPE", "int8")
+        print("✅ 已关闭 GPU 加速（WHISPER_DEVICE=cpu 写入 .env）")
+    elif ans == "1":
+        remove_env_key(env_file, "WHISPER_DEVICE")
+        remove_env_key(env_file, "WHISPER_COMPUTE_TYPE")
+        print("✅ 已设为自动（下次运行重新探测 GPU）")
+
+    # 3) 并行转写路数
+    print("\n⚙️ 并行转写路数（默认自动开启）")
+    print("   自动：CPU 按核数（上限4路），GPU 默认单路；输入 1 即关闭并行")
+    cur_p = os.environ.get("BILI_PARALLEL", "auto")
+    try:
+        ans = input(f"   当前 [{cur_p}]，回车保留，或输入数字: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    if ans:
+        set_env_value(env_file, "BILI_PARALLEL", ans)
+        print(f"✅ BILI_PARALLEL = {ans}（已写入 {env_file}）")
+
+    # 4) Whisper 模型规格（可自定义：内置规格或本地模型目录路径）
     print("\n🧠 Whisper 模型规格（音频转文字的核心模型）")
     print("   内置可选: tiny / base / small / medium / large-v3（越大越准、越慢、越吃内存）")
     print("   也可输入本地模型目录的绝对路径（faster-whisper 直接加载该路径，跳过下载）")
@@ -718,7 +804,7 @@ def setup_wizard(check_only=False):
     else:
         print(f"✅ 保留 WHISPER_SIZE = {cur_size}")
 
-    # 3) 模型缓存位置（默认 ~/.cache/huggingface，可自由指定目录）
+    # 5) 模型缓存位置（默认 ~/.cache/huggingface，可自由指定目录）
     print("\n📂 Whisper 模型缓存位置（模型下载后存放的目录）")
     cur_hf = os.environ.get("HF_HOME")
     hint = f"当前 [{cur_hf}]" if cur_hf else "当前 [默认 ~/.cache/huggingface]"
@@ -733,7 +819,7 @@ def setup_wizard(check_only=False):
     else:
         print("✅ 使用默认缓存位置（~/.cache/huggingface）")
 
-    # 4) DeepSeek API Key（仅总结模式需要）
+    # 6) DeepSeek API Key（仅总结模式需要）
     print("\n🔑 DeepSeek API Key（仅“转写+AI总结”模式需要；只转写可回车跳过）")
     try:
         key = input("   请输入 API Key（回车跳过）: ").strip()
@@ -748,7 +834,7 @@ def setup_wizard(check_only=False):
     else:
         print("⚠️ 未配置 API Key —— 仅可使用 --no-summary 转写模式")
 
-    # 5) 模型下载镜像地址
+    # 7) 模型下载镜像地址
     if os.environ.get("HF_ENDPOINT"):
         print(f"✅ 模型镜像已配置: {os.environ['HF_ENDPOINT']}")
     elif _hf_reachable():
@@ -761,7 +847,7 @@ def setup_wizard(check_only=False):
         os.chmod(env_file, 0o600)
         print(f"✅ 配置文件: {env_file}（权限 600，仅本用户可读）")
 
-    # 6) Whisper 模型预下载（按所选规格，仅首次）
+    # 8) Whisper 模型预下载（按所选规格，仅首次）
     print(f"\n⬇️ 预下载 Whisper {WHISPER_SIZE} 模型（约数百 MB；不下载则首次转写时自动下载）")
     print("   若 WHISPER_SIZE 填的是本地路径，此步会直接验证该路径可用性")
     try:
@@ -788,8 +874,12 @@ def setup_wizard(check_only=False):
 
 # ============ 主流程 ============
 class _HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
-    """帮助格式：保留原始换行 + 显示参数默认值"""
-    pass
+    """帮助格式：保留原始换行 + 显示参数默认值（隐藏 None 默认）"""
+    def _get_help_string(self, action):
+        help_text = super()._get_help_string(action)
+        if action.default is None:
+            help_text = help_text.replace(" (default: %(default)s)", "")
+        return help_text
 
 
 def parse_args(argv):
@@ -840,17 +930,16 @@ def parse_args(argv):
     ap.add_argument("-f", "--file", help="从文件读取链接列表（每行一个，# 开头为注释）")
     ap.add_argument("-o", "--outdir", default=os.environ.get("BILI_OUTPUT_DIR", "output"),
                     help="输出目录（可用环境变量 BILI_OUTPUT_DIR 覆盖）")
-    ap.add_argument("--no-summary", action="store_true",
-                    help="只转写，不调用 DeepSeek 总结（无需 API Key；输出为纯文本文件）")
+    ap.add_argument("--no-summary", action="store_true", default=None,
+                    help="只转写，不调用 DeepSeek 总结（无需 API Key；输出为纯文本文件；未指定时读配置 BILI_NO_SUMMARY）")
     ap.add_argument("--keep-links", action="store_true",
                     help="交互模式结束后保留 links.txt（默认自动删除）")
-    ap.add_argument("-p", "--parallel", type=int, default=1, metavar="N",
-                    help="并行处理线程数（默认1：转写顺序进行，但下载会提前预取与转写重叠；"
-                         "N>1 时多个视频同时转写，每线程独立模型实例，CPU 用户建议 ≤ 核数/2，GPU 建议 1）")
-    ap.add_argument("--skip-existing", action="store_true",
-                    help="断点续传：输出目录已有同名转写文件时直接跳过（仅请求一次元数据，不下载）")
-    ap.add_argument("--with-timestamps", action="store_true",
-                    help="额外生成带时间戳的 .srt 字幕文件（与纯文本 .txt 并存）")
+    ap.add_argument("-p", "--parallel", type=int, default=None, metavar="N",
+                    help="并行处理线程数（默认自动：CPU 按核数上限4，GPU 单路；手动关闭用 -p 1，配置键 BILI_PARALLEL）")
+    ap.add_argument("--skip-existing", action="store_true", default=None,
+                    help="断点续传：输出目录已有同名转写文件时直接跳过（仅请求一次元数据，不下载；配置键 BILI_SKIP_EXISTING）")
+    ap.add_argument("--with-timestamps", action="store_true", default=None,
+                    help="额外生成带时间戳的 .srt 字幕文件（与纯文本 .txt 并存；配置键 BILI_WITH_TIMESTAMPS）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只预览：显示归一化 URL、抓取视频标题与输出文件名（不下载/不转写/不调AI）")
     ap.add_argument("--setup", action="store_true",
@@ -976,6 +1065,12 @@ def report(outdir, results):
 
 def main():
     args = parse_args(sys.argv[1:])
+    detect_best_device()          # GPU 自动加速（.env 设 WHISPER_DEVICE=cpu 可关闭）
+    # 配置优先级：命令行显式 > .env/环境变量 > 自动默认（GPU/并行默认全自动开启）
+    args.parallel = resolve_parallel(args.parallel)
+    args.no_summary = args.no_summary if args.no_summary is not None else cfg_flag("BILI_NO_SUMMARY")
+    args.skip_existing = args.skip_existing if args.skip_existing is not None else cfg_flag("BILI_SKIP_EXISTING")
+    args.with_timestamps = args.with_timestamps if args.with_timestamps is not None else cfg_flag("BILI_WITH_TIMESTAMPS")
     if args.setup:
         setup_wizard(check_only=args.check)
         sys.exit(0)

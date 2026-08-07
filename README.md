@@ -21,7 +21,9 @@
 - ✅ **零配置自举**：首次运行自动创建 `.venv` 并安装依赖，**下载即用**
 - ✅ **可 pip 安装**：`pip install .` 或 `pip install git+...` 后获得 `bili-summary` 命令
 - ✅ **跨平台**：Linux / macOS / Windows
-- ✅ **并行流水线**：下载预取与转写重叠，不再“下完一个才下下一个”；`-p N` 多路并行转写（CPU 线程自动分摊，GPU 用户建议保持 1）
+- ✅ **GPU 自动加速**：检测到 NVIDIA 显卡自动启用 CUDA+float16，无需手动配置；想关掉在 `.env` 设 `WHISPER_DEVICE=cpu` 即可
+- ✅ **并行默认自动**：按 CPU 核数自动开启（上限 4 路，GPU 默认单路）；`-p 1` 或 `BILI_PARALLEL=1` 可手动关闭
+- ✅ **并行流水线**：下载预取与转写重叠，不再“下完一个才下下一个”；`-p N` 多路并行转写（CPU 线程自动分摊）
 - ✅ **断点续传**：`--skip-existing` 已转写过的视频直接跳过（只请求一次元数据，不重复下载），批量中断后重跑不浪费
 - ✅ **字幕输出**：`--with-timestamps` 额外生成带时间戳的 `.srt` 字幕（与纯文本 `.txt` 并存）
 - ✅ **模型自由定制**：`WHISPER_SIZE` 任选 tiny/base/small/medium/large-v3 **或本地模型目录路径**；`HF_HOME` 自定义模型缓存位置（`--setup` 向导可一键设置）
@@ -153,7 +155,7 @@ $ python bili_summary.py
   -i, --interactive 强制进入交互模式：逐行输入链接，空行开始处理
   -f, --file FILE   从文件读取链接列表（每行一个，# 开头为注释）
   -o, --outdir DIR  输出目录（默认 ./output）
-  -p, --parallel N  并行处理线程数（默认1：转写顺序进行，但下载提前预取与转写重叠；N>1 多路同时转写，每路独立模型实例，CPU 建议 ≤ 核数/2，GPU 建议 1）
+  -p, --parallel N  并行路数（默认自动：CPU 按核数上限4，GPU 单路；N>1 多路同时转写；手动关闭用 -p 1，配置键 BILI_PARALLEL）
   --no-summary      只转写，不调用 DeepSeek 总结（无需 API Key）
   --skip-existing   断点续传：已有同名转写文件则直接跳过（只请求一次元数据，不下载）
   --with-timestamps 额外生成带时间戳的 .srt 字幕（与纯文本 .txt 并存）
@@ -226,7 +228,11 @@ python bili_summary.py -f links.txt --no-summary -o transcripts
 
 ### 环境变量与 .env 配置
 
-配置优先级：**真实环境变量 > 项目目录 `.env` 文件 > 代码默认值**。
+配置优先级：**命令行参数 > 真实环境变量 > 项目目录 `.env` 文件 > 代码默认值**。
+
+> 大多数运行参数（并行、断点续传、字幕、只转写）都可以不敲命令行，直接在 `.env` 里改：`BILI_PARALLEL` / `BILI_SKIP_EXISTING` / `BILI_WITH_TIMESTAMPS` / `BILI_NO_SUMMARY`。命令行显式给出时优先于文件。
+>
+> 硬件加速默认全自动：有 NVIDIA GPU 自动用 `cuda+float16`，否则 `cpu+int8`；`.env` 设 `WHISPER_DEVICE=cpu` 即关闭 GPU。
 `.env` 由 `python bili_summary.py --setup` 生成，也可手写（每行 `KEY=VALUE`，`#` 注释，权限建议 600）。
 
 | 变量 | 说明 | 默认 |
@@ -236,12 +242,16 @@ python bili_summary.py -f links.txt --no-summary -o transcripts
 | `DEEPSEEK_MODEL` | 总结主模型 | `deepseek-chat` |
 | `DEEPSEEK_MODEL_FALLBACK` | 主模型失败时的备用模型 | `deepseek-reasoner` |
 | `WHISPER_SIZE` | Whisper 模型规格：`tiny`/`base`/`small`/`medium`/`large-v3`，或本地模型目录绝对路径（跳过下载直接加载） | `small` |
-| `WHISPER_DEVICE` | 推理设备 | `cpu` |
-| `WHISPER_COMPUTE_TYPE` | 量化类型 | `int8` |
+| `WHISPER_DEVICE` | 推理设备（留空=自动探测：有 NVIDIA GPU 用 cuda，否则 cpu） | 自动 |
+| `WHISPER_COMPUTE_TYPE` | 量化类型（GPU 自动用 float16，CPU 用 int8） | 自动 |
 | `HF_ENDPOINT` | HuggingFace 镜像地址（模型下载） | 自动探测，必要时 `https://hf-mirror.com` |
 | `HF_HOME` | 模型缓存目录（自定义“模型安装位置”；Windows/Linux 均自动展开 `~`） | 默认 `~/.cache/huggingface` |
 | `BILI_OUTPUT_DIR` | 默认输出目录 | `./output` |
 | `BILI_VENV_DIR` | 虚拟环境目录（须为真实环境变量） | `脚本目录/.venv` |
+| `BILI_PARALLEL` | 并行路数：`auto`=按核数自动（上限4，GPU单路），`1`=关闭并行，`N`=固定N路 | `auto` |
+| `BILI_SKIP_EXISTING` | `1`=断点续传，跳过已转写视频（等价 `--skip-existing`） | `0` |
+| `BILI_WITH_TIMESTAMPS` | `1`=额外生成 `.srt` 字幕（等价 `--with-timestamps`） | `0` |
+| `BILI_NO_SUMMARY` | `1`=只转写不调 AI（等价 `--no-summary`） | `0` |
 
 ---
 
@@ -269,7 +279,13 @@ Debian/Ubuntu 可能需要先装 `python3-venv`（`sudo apt install python3-venv
 不需要，转写全程本地完成，不调用任何云 API。
 
 **Q: 转写很慢，怎么并行加速？**
-默认单路顺序转写，但下载会提前预取（下载与转写重叠）。要多路并行用 `-p N`：CPU 用户建议 `-p 2`~`-p 3`（每路模型约占 500MB~1GB 内存，N 别超过核数/2）；GPU 用户建议保持 `-p 1`（多实例会成倍占显存）。
+默认已自动并行：按 CPU 核数开启（上限 4 路），下载也会提前预取与转写重叠。要调整用 `-p N`（或 `.env` 的 `BILI_PARALLEL`）：CPU 用户建议 `-p 2`~`-p 3`（每路模型约占 500MB~1GB 内存）；GPU 用户保持自动（单路）。
+
+**Q: 有 NVIDIA 显卡，会自动用 GPU 吗？**
+会。启动时自动检测，检测到即用 `cuda+float16`，无需配置。想关闭：`.env` 设 `WHISPER_DEVICE=cpu`。
+
+**Q: 不想每次敲 `--skip-existing` / `--with-timestamps`？**
+直接改项目目录 `.env`：`BILI_SKIP_EXISTING=1`、`BILI_WITH_TIMESTAMPS=1`，之后每次运行自动生效；命令行再给出时以命令行优先。
 
 **Q: 批量处理中断了，能续跑吗？**
 加 `--skip-existing` 重跑：已生成的转写文件会被跳过，只处理缺失的，且只请求一次元数据、不重复下载。
