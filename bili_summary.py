@@ -13,6 +13,9 @@ bili_summary.py — B站视频一键转文字稿 + AI 总结（支持多链接�
   python bili_summary.py --no-summary <链接...>             # 只转写，不调用 AI 总结（无需 API Key）
   python bili_summary.py --setup                            # 一键配置向导（API Key/镜像/模型预下载）
   python bili_summary.py --dry-run -f links.txt             # 只预览链接解析结果，不实际处理
+  python bili_summary.py -p 2 -f links.txt                  # 并行：下载预取与转写重叠，2 路同时转写
+  python bili_summary.py --skip-existing -f links.txt       # 断点续传：已转写过的视频直接跳过
+  python bili_summary.py --with-timestamps BV1xx...         # 额外生成带时间戳的 .srt 字幕
 
 安装方式（GitHub）:
   git clone 后直接运行（自动创建 .venv 并安装依赖）；或 pip install . 安装为 bili-summary 命令
@@ -28,8 +31,10 @@ bili_summary.py — B站视频一键转文字稿 + AI 总结（支持多链接�
 
 输出（一个文件夹内的一堆纯文本文件）:
   output/<视频标题>.txt             每段视频的完整文字稿（文件名=视频标题，去非法字符/截断80字）
+  output/<视频标题>.srt             带时间戳字幕（仅 --with-timestamps）
   output/<视频标题>.summary.txt     每段视频的AI总结（仅开启总结时）
   output/summaries.md              全部视频的汇总（仅开启总结时）
+  output/report.md                 处理报告（成功/跳过/失败，始终生成）
 
 可迁移说明:
   - 依赖自动安装到脚本所在目录的 .venv（环境变量 BILI_VENV_DIR 可覆盖路径）
@@ -39,12 +44,14 @@ bili_summary.py — B站视频一键转文字稿 + AI 总结（支持多链接�
 import argparse
 import importlib.util
 import os
+import queue
 import re
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,8 +63,12 @@ IMPORT_NAMES = {p: p.replace("-", "_") for p in REQUIREMENTS}                 # 
 __version__ = "2.4.1"
 
 
+_print_lock = threading.Lock()   # 多线程打印互斥，避免日志交错
+
+
 def log(msg):
-    print(f"[bili_summary] {msg}", flush=True)
+    with _print_lock:
+        print(f"[bili_summary] {msg}", flush=True)
 
 
 def load_env_file(path):
@@ -188,8 +199,9 @@ def with_retry(fn, name, retries=1, delay=3):
                 raise RuntimeError(f"{name} 多次尝试后仍失败：{e}") from e
 
 def run_with_timeout(fn, timeout, name):
-    """用 SIGALRM 兜底超时（仅防死锁，正常耗时远小于 timeout）；Windows 无 SIGALRM 则直接执行"""
-    if not hasattr(signal, "SIGALRM"):
+    """用 SIGALRM 兜底超时（仅防死锁，正常耗时远小于 timeout）；
+    Windows 无 SIGALRM、或运行在工作线程时（信号仅主线程可用）直接执行"""
+    if not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
         return fn()
     def _alarm(signum, frame):
         raise TimeoutError(f"{name} 超时（>{timeout}s），疑似卡死")
@@ -249,14 +261,54 @@ def ensure_model_endpoint():
         log("↪ huggingface.co 不可达，自动切换模型镜像 hf-mirror.com")
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
-def load_model():
-    """加载 Whisper 模型（多视频共用同一实例，避免重复下载/加载）"""
+_model_local = threading.local()          # 每个线程独立的 Whisper 模型实例
+_model_lock = threading.Lock()            # 模型实例创建互斥（避免并发重复下载/加载）
+
+
+def load_model(cpu_threads=0):
+    """加载 Whisper 模型（多线程并行时每个线程各持一个实例，共享同一份磁盘缓存）"""
     from faster_whisper import WhisperModel
     ensure_model_endpoint()
+    kwargs = {"device": DEVICE, "compute_type": COMPUTE_TYPE}
+    if cpu_threads:
+        kwargs["cpu_threads"] = cpu_threads
     log(f"🧠 加载 Whisper {WHISPER_SIZE} 模型（{DEVICE}/{COMPUTE_TYPE}），首次使用需下载模型...")
-    return with_retry(lambda: WhisperModel(WHISPER_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE), "模型加载")
+    return with_retry(lambda: WhisperModel(WHISPER_SIZE, **kwargs), "模型加载")
 
-def transcribe(audio_path, model, save_path):
+
+def get_worker_model(cpu_threads=0):
+    """线程内惰性加载模型（每个线程只加载一次，多视频复用）"""
+    m = getattr(_model_local, "model", None)
+    if m is None:
+        with _model_lock:                       # 只串行化“创建”，各线程最终各持一个实例
+            m = getattr(_model_local, "model", None)
+            if m is None:
+                m = load_model(cpu_threads)
+                _model_local.model = m
+    return m
+
+def _fmt_srt_ts(t):
+    """秒 → SRT 时间戳 HH:MM:SS,mmm"""
+    ms = int(round(max(0, t) * 1000))
+    h, rem = divmod(ms, 3600000)
+    m, rem = divmod(rem, 60000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_srt(segs, path):
+    """把带时间戳的分段写成 .srt 字幕（与纯文本 .txt 并存）"""
+    lines = []
+    for i, seg in enumerate(segs, 1):
+        text = (seg.text or "").strip()
+        if not text:
+            continue
+        lines += [str(i), f"{_fmt_srt_ts(seg.start)} --> {_fmt_srt_ts(seg.end)}", text, ""]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def transcribe(audio_path, model, save_path, with_timestamps=False):
     log("🎧 开始中文语音识别（小模型 CPU int8，请耐心等待）...")
 
     def _run(pass_no):
@@ -271,7 +323,8 @@ def transcribe(audio_path, model, save_path):
                 audio_path, language=None, vad_filter=False, beam_size=5,
                 condition_on_previous_text=False,
             )
-        return "".join(s.text for s in segs).strip(), info.duration
+        segs = list(segs)   # 物化分段（含时间戳，供 .srt 使用）
+        return "".join(s.text for s in segs).strip(), info.duration, segs
 
     def _run_zh():
         return run_with_timeout(lambda: _run(1), TRANS_TIMEOUT, "语音识别")
@@ -279,17 +332,21 @@ def transcribe(audio_path, model, save_path):
     def _run_auto():
         return run_with_timeout(lambda: _run(2), TRANS_TIMEOUT, "语音识别(自动语种)")
 
-    text, duration = with_retry(_run_zh, "语音识别(中文)", retries=1)
+    text, duration, segs = with_retry(_run_zh, "语音识别(中文)", retries=1)
     min_chars = max(20, int(duration * 0.3))  # 按音频时长估算最低字数
     if len(text) < min_chars:
         log(f"⚠ 中文识别结果过短（{len(text)}字 / 音频{duration:.0f}s），尝试自动语种识别...")
-        text, _ = with_retry(_run_auto, "语音识别(自动语种)", retries=1)
+        text, duration, segs = with_retry(_run_auto, "语音识别(自动语种)", retries=1)
     text = text.strip()
     if len(text) < 10:
         raise RuntimeError("识别结果过短，音频可能为纯音乐或语音不清")
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(text)
+    if with_timestamps:
+        srt_path = os.path.splitext(save_path)[0] + ".srt"
+        write_srt(segs, srt_path)
+        log(f"🎞 字幕已保存: {srt_path}")
     log(f"✅ 转写完成，共 {len(text)} 字，已保存到 {save_path}")
     return text
 
@@ -513,32 +570,81 @@ def write_combined(outdir, results):
         f.write("\n".join(lines) + "\n")
     log(f"📄 全量汇总已写入: {path}")
 
+
+def write_report(outdir, results):
+    """始终生成 report.md：成功/跳过/失败清单（批量任务可回溯）"""
+    ok = [r for r in results if "error" not in r and "skipped" not in r]
+    skip = [r for r in results if "skipped" in r]
+    bad = [r for r in results if "error" in r]
+    lines = ["# bili_summary 处理报告", "",
+             f"- 成功: {len(ok)}，跳过: {len(skip)}，失败: {len(bad)}", ""]
+    for i, r in enumerate(ok, 1):
+        title = r.get("title") or r["url"]
+        lines += [f"## {i}. {title}", "", f"- 链接: {r['url']}", f"- BV号: {r.get('bvid') or '-'}",
+                  f"- 文字稿: `{r['transcript_path']}`"]
+        if r.get("srt_path"):
+            lines += [f"- 字幕: `{r['srt_path']}`"]
+        if r.get("summary_path"):
+            lines += [f"- 总结: `{r['summary_path']}`"]
+        lines.append("")
+    if skip:
+        lines += ["## 已跳过（之前已转写）", ""]
+        for r in skip:
+            lines += [f"- {r['url']}: `{r['transcript_path']}`", ""]
+    if bad:
+        lines += ["## 处理失败", ""]
+        for r in bad:
+            lines += [f"- {r['url']}: {r['error']}", ""]
+    path = os.path.join(outdir, "report.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    log(f"📄 处理报告已写入: {path}")
+
 # ============ 6. 单视频处理 ============
-def process_one(url, outdir, model_holder, summarize=True, used_names=None):
-    """下载→转写→(可选)总结 一个视频，返回结果字典；失败抛异常由调用方捕获"""
-    bvid = extract_bvid(url)
-    log(f"🎯 目标: {url}（BV号: {bvid or '无'}）")
+def download_one(url):
+    """下载音频到临时目录，返回 (临时目录, 音频路径, 标题)；失败时清理临时目录并抛出"""
+    log(f"🎯 目标: {url}（BV号: {extract_bvid(url) or '无'}）")
     tmpdir = tempfile.mkdtemp(prefix="bili_audio_")
     try:
         audio, title = download_audio(url, tmpdir)
-        if model_holder["model"] is None:
-            model_holder["model"] = load_model()   # Whisper 模型只加载一次，多视频复用
-        key = vid_key(url)
-        used = used_names if used_names is not None else set()
-        fname = make_output_name(title, key, used)   # 文件名=视频标题
-        os.makedirs(outdir, exist_ok=True)
-        tpath = os.path.join(outdir, f"{fname}.txt")   # 扁平输出：每视频一个纯文本文件
-        transcript = transcribe(audio, model_holder["model"], tpath)
-        res = {"url": url, "bvid": bvid, "title": title,
-               "key": key, "name": fname,
-               "transcript_path": tpath, "transcript": transcript}
-        if summarize:
-            summary = summarize_all(transcript)
-            spath = os.path.join(outdir, f"{fname}.summary.txt")
-            with open(spath, "w", encoding="utf-8") as f:
-                f.write(summary)
-            res.update({"summary": summary, "summary_path": spath})
-        return res
+        return tmpdir, audio, title
+    except Exception:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
+
+def process_one(url, outdir, tmpdir, audio, title, summarize=True, used_names=None,
+                name_lock=None, with_timestamps=False, cpu_threads=0):
+    """对已下载音频执行 转写→(可选)总结，返回结果字典；失败抛异常由调用方捕获"""
+    bvid = extract_bvid(url)
+    key = vid_key(url)
+    if name_lock is not None:
+        with name_lock:
+            fname = make_output_name(title, key, used_names)   # 文件名=视频标题
+    else:
+        fname = make_output_name(title, key, used_names)
+    model = get_worker_model(cpu_threads)          # 每个线程复用自己已加载的模型实例
+    os.makedirs(outdir, exist_ok=True)
+    tpath = os.path.join(outdir, f"{fname}.txt")   # 扁平输出：每视频一个纯文本文件
+    transcript = transcribe(audio, model, tpath, with_timestamps=with_timestamps)
+    res = {"url": url, "bvid": bvid, "title": title,
+           "key": key, "name": fname,
+           "transcript_path": tpath, "transcript": transcript}
+    if with_timestamps:
+        res["srt_path"] = os.path.splitext(tpath)[0] + ".srt"
+    if summarize:
+        summary = summarize_all(transcript)
+        spath = os.path.join(outdir, f"{fname}.summary.txt")
+        with open(spath, "w", encoding="utf-8") as f:
+            f.write(summary)
+        res.update({"summary": summary, "summary_path": spath})
+    return res
+
+
+def finish_one(url, outdir, tmpdir, audio, title, **kw):
+    """包装 process_one：无论成功失败都清理该视频的临时音频目录"""
+    try:
+        return process_one(url, outdir, tmpdir, audio, title, **kw)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
         log("🧹 临时音频文件已清理")
@@ -738,6 +844,13 @@ def parse_args(argv):
                     help="只转写，不调用 DeepSeek 总结（无需 API Key；输出为纯文本文件）")
     ap.add_argument("--keep-links", action="store_true",
                     help="交互模式结束后保留 links.txt（默认自动删除）")
+    ap.add_argument("-p", "--parallel", type=int, default=1, metavar="N",
+                    help="并行处理线程数（默认1：转写顺序进行，但下载会提前预取与转写重叠；"
+                         "N>1 时多个视频同时转写，每线程独立模型实例，CPU 用户建议 ≤ 核数/2，GPU 建议 1）")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="断点续传：输出目录已有同名转写文件时直接跳过（仅请求一次元数据，不下载）")
+    ap.add_argument("--with-timestamps", action="store_true",
+                    help="额外生成带时间戳的 .srt 字幕文件（与纯文本 .txt 并存）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只预览：显示归一化 URL、抓取视频标题与输出文件名（不下载/不转写/不调AI）")
     ap.add_argument("--setup", action="store_true",
@@ -746,23 +859,119 @@ def parse_args(argv):
     ap.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     return ap.parse_args(argv)
 
+def run_pipeline(links, outdir, args):
+    """流水线并行：下载线程池预取音频 → N 个处理线程转写/总结。
+    - 默认 N=1：转写仍顺序进行，但下载提前预取（下载与转写重叠，不再“下完一个才下下一个”）
+    - N>1：多个视频同时转写（每线程独立模型实例，CPU 线程数自动分摊）"""
+    import concurrent.futures as cf
+    n = max(1, args.parallel or 1)
+    cpu_threads = 0
+    if n > 1 and DEVICE == "cpu":
+        cores = os.cpu_count() or 4
+        cpu_threads = max(1, cores // n)
+        log(f"⚙️ 并行 {n} 路转写：每路 CPU {cpu_threads} 线程（共 {cores} 核）")
+    elif n > 1 and DEVICE != "cpu":
+        log(f"⚠️ GPU 设备并行 {n} 路会成倍占用显存，建议 --parallel 1")
+
+    used_names = set()                 # 输出文件名去重（标题相同则加 _2/_3）
+    name_lock = threading.Lock()
+    results = {}
+    q = queue.Queue(maxsize=n + 2)     # 限制在途下载数量，形成背压
+
+    def dl_worker(idx, url):
+        try:
+            tmpdir, audio, title = download_one(url)
+            q.put((idx, url, {"tmpdir": tmpdir, "audio": audio, "title": title}))
+        except Exception as e:
+            q.put((idx, url, {"error": str(e)}))
+
+    def tx_worker():
+        while True:
+            item = q.get()
+            try:
+                if item is None:       # 结束哨兵
+                    break
+                idx, url, payload = item
+                if "error" in payload:
+                    results[idx] = {"url": url, "error": payload["error"]}
+                    log(f"❌ 下载失败 {url}: {payload['error']}")
+                    continue
+                res = finish_one(url, outdir, payload["tmpdir"], payload["audio"], payload["title"],
+                                 summarize=not args.no_summary, used_names=used_names,
+                                 name_lock=name_lock, with_timestamps=args.with_timestamps,
+                                 cpu_threads=cpu_threads)
+                results[idx] = res
+                with _print_lock:
+                    print("\n" + "=" * 56)
+                    print(f"📝 {'AI 总结' if 'summary' in res else '转写结果'} {idx + 1}/{len(links)}")
+                    print("=" * 56)
+                    if "summary" in res:
+                        print(res["summary"])
+                    else:
+                        print(f"文字稿已保存: {res['transcript_path']}（共 {len(res['transcript'])} 字）")
+                    print("=" * 56)
+            except Exception as e:
+                results[idx] = {"url": url, "error": str(e)}
+                log(f"❌ 处理失败 {url}: {e}")
+            finally:
+                q.task_done()
+
+    # 先启动处理线程（消费队列），再提交下载任务，避免队列满时下载线程阻塞成死锁
+    workers = [threading.Thread(target=tx_worker, daemon=True) for _ in range(n)]
+    for w in workers:
+        w.start()
+
+    n_dl = min(len(links), max(2, n + 1))          # 下载线程略多于处理线程，保证预取
+    futs = []
+    dl_pool = cf.ThreadPoolExecutor(max_workers=n_dl)
+    try:
+        for idx, raw in enumerate(links):
+            url = normalize_url(raw)
+            if args.skip_existing:
+                title = fetch_title(url)           # 仅元数据请求，不下载
+                fname = sanitize_title(title) if title else None
+                cand = os.path.join(outdir, (fname or vid_key(url)) + ".txt")
+                if os.path.exists(cand):
+                    results[idx] = {"url": url, "title": title or url,
+                                    "skipped": True, "transcript_path": cand}
+                    log(f"⏭ 已存在，跳过: {cand}")
+                    continue
+            log(f"\n===== [{idx + 1}/{len(links)}] 开始处理 {url} ===")
+            futs.append(dl_pool.submit(dl_worker, idx, url))
+        cf.wait(futs)
+    finally:
+        for _ in range(n):                         # 下载全部入队后发结束哨兵
+            q.put(None)
+        dl_pool.shutdown()
+    for w in workers:
+        w.join()
+    return [results.get(i, {"url": links[i], "error": "未处理"})
+            for i in range(len(links))]
+
+
 def report(outdir, results):
-    ok = [r for r in results if "error" not in r]
+    ok = [r for r in results if "error" not in r and "skipped" not in r]
+    skip = [r for r in results if "skipped" in r]
     bad = [r for r in results if "error" in r]
     summary_mode = any("summary" in r for r in ok)
     print("\n" + "#" * 56)
-    print(f"📊 汇总报告: 成功 {len(ok)} / 共 {len(results)}")
+    print(f"📊 汇总报告: 成功 {len(ok)}，跳过 {len(skip)}，失败 {len(bad)} / 共 {len(results)}")
     print("#" * 56)
     for i, r in enumerate(ok, 1):
         title = r.get("title") or r["url"]
         print(f"  ✅ [{i}] {title}")
         print(f"      ├ 文字稿: {r['transcript_path']}")
+        if "srt_path" in r:
+            print(f"      ├ 字幕:   {r['srt_path']}")
         if "summary" in r:
             print(f"      └ 总结:   {r['summary_path']}")
+    for r in skip:
+        print(f"  ⏭ {r.get('title') or r['url']}: 已存在，跳过")
     for r in bad:
         print(f"  ❌ {r['url']}: {r['error']}")
     if summary_mode:
         print(f"  📄 全量汇总: {os.path.join(outdir, 'summaries.md')}")
+    print(f"  📄 处理报告: {os.path.join(outdir, 'report.md')}")
     print(f"  📁 输出目录: {outdir}")
 
 def main():
@@ -810,29 +1019,11 @@ def main():
         mode = "转写 + AI 总结" if not args.no_summary else "仅转写（不调用 AI）"
         log(f"共 {len(links)} 个视频待处理，模式: {mode}，输出目录: {outdir}")
 
-        model_holder = {"model": None}   # Whisper 模型全局复用
-        used_names = set()               # 输出文件名去重（标题相同则加 _2/_3）
-        results = []
-        for i, raw in enumerate(links, 1):
-            url = normalize_url(raw)
-            log(f"\n===== [{i}/{len(links)}] 开始处理 {url} =====")
-            try:
-                res = process_one(url, outdir, model_holder, summarize=not args.no_summary, used_names=used_names)
-                results.append(res)
-                print("\n" + "=" * 56)
-                print(f"📝 {'AI 总结' if 'summary' in res else '转写结果'} {i}/{len(links)}")
-                print("=" * 56)
-                if "summary" in res:
-                    print(res["summary"])
-                else:
-                    print(f"文字稿已保存: {res['transcript_path']}（共 {len(res['transcript'])} 字）")
-                print("=" * 56)
-            except Exception as e:
-                log(f"❌ 处理失败: {e}")
-                results.append({"url": url, "error": str(e)})
+        results = run_pipeline(links, outdir, args)   # 流水线：下载预取 + N 路并行转写
 
         if not args.no_summary:
             write_combined(outdir, results)
+        write_report(outdir, results)
         report(outdir, results)
     finally:
         # 自动清理：links.txt 与 __pycache__

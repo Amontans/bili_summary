@@ -21,6 +21,9 @@
 - ✅ **零配置自举**：首次运行自动创建 `.venv` 并安装依赖，**下载即用**
 - ✅ **可 pip 安装**：`pip install .` 或 `pip install git+...` 后获得 `bili-summary` 命令
 - ✅ **跨平台**：Linux / macOS / Windows
+- ✅ **并行流水线**：下载预取与转写重叠，不再“下完一个才下下一个”；`-p N` 多路并行转写（CPU 线程自动分摊，GPU 用户建议保持 1）
+- ✅ **断点续传**：`--skip-existing` 已转写过的视频直接跳过（只请求一次元数据，不重复下载），批量中断后重跑不浪费
+- ✅ **字幕输出**：`--with-timestamps` 额外生成带时间戳的 `.srt` 字幕（与纯文本 `.txt` 并存）
 - ✅ **模型自由定制**：`WHISPER_SIZE` 任选 tiny/base/small/medium/large-v3 **或本地模型目录路径**；`HF_HOME` 自定义模型缓存位置（`--setup` 向导可一键设置）
 - ✅ 中文优先识别，失败自动切自动语种（兼容外语/音乐视频）
 - ✅ huggingface.co 不可达时自动切换 hf-mirror.com 镜像
@@ -144,13 +147,16 @@ $ python bili_summary.py
 ## ⚙️ 用法
 
 ```text
-用法: python bili_summary.py [inputs...] [-i] [-f FILE] [-o OUTDIR] [--no-summary] [--keep-links] [--dry-run] [--setup] [--check]
+用法: python bili_summary.py [inputs...] [-i] [-f FILE] [-o OUTDIR] [-p N] [--no-summary] [--skip-existing] [--with-timestamps] [--keep-links] [--dry-run] [--setup] [--check]
 
   inputs            B站链接或BV号，可多个（无任何输入时自动进入交互模式）
   -i, --interactive 强制进入交互模式：逐行输入链接，空行开始处理
   -f, --file FILE   从文件读取链接列表（每行一个，# 开头为注释）
   -o, --outdir DIR  输出目录（默认 ./output）
+  -p, --parallel N  并行处理线程数（默认1：转写顺序进行，但下载提前预取与转写重叠；N>1 多路同时转写，每路独立模型实例，CPU 建议 ≤ 核数/2，GPU 建议 1）
   --no-summary      只转写，不调用 DeepSeek 总结（无需 API Key）
+  --skip-existing   断点续传：已有同名转写文件则直接跳过（只请求一次元数据，不下载）
+  --with-timestamps 额外生成带时间戳的 .srt 字幕（与纯文本 .txt 并存）
   --keep-links      交互模式结束后保留 links.txt（默认自动删除）
   --dry-run         只预览：显示归一化 URL、抓取视频标题与输出文件名（不下载/不转写/不调AI）
   --setup           一键配置向导（API Key / 模型镜像 / 模型预下载）
@@ -191,9 +197,11 @@ $ python bili_summary.py --dry-run BV1GJ411x7h7
 ```text
 output/                                ← -o 指定（默认 ./output）
 ├── 视频标题.txt                       ← ① 文字稿（文件名=视频标题，--no-summary 模式只有这类文件）
+├── 视频标题.srt                       ← ①' 带时间戳字幕（仅 --with-timestamps）
 ├── 视频标题.summary.txt               ← ② AI 总结（仅开启总结时）
 ├── 另一个视频标题.txt
-└── summaries.md                       ← ③ 全量汇总（仅开启总结时）
+├── summaries.md                       ← ③ 全量汇总（仅开启总结时）
+└── report.md                          ← ④ 处理报告（成功/跳过/失败，始终生成）
 ```
 
 **文件名 = 视频标题**：自动去非法字符、压缩空白、截断 80 字；同批重名自动加 `_2`/`_3`；抓不到标题时回退为视频 ID。重复运行同一视频会**覆盖**同名文件，不同视频互不干扰。
@@ -260,6 +268,15 @@ Debian/Ubuntu 可能需要先装 `python3-venv`（`sudo apt install python3-venv
 **Q: 用 `--no-summary` 还需要 API Key 吗？**
 不需要，转写全程本地完成，不调用任何云 API。
 
+**Q: 转写很慢，怎么并行加速？**
+默认单路顺序转写，但下载会提前预取（下载与转写重叠）。要多路并行用 `-p N`：CPU 用户建议 `-p 2`~`-p 3`（每路模型约占 500MB~1GB 内存，N 别超过核数/2）；GPU 用户建议保持 `-p 1`（多实例会成倍占显存）。
+
+**Q: 批量处理中断了，能续跑吗？**
+加 `--skip-existing` 重跑：已生成的转写文件会被跳过，只处理缺失的，且只请求一次元数据、不重复下载。
+
+**Q: 想要带时间戳的字幕？**
+加 `--with-timestamps`，每个视频会额外生成同名 `.srt` 字幕（纯文本 `.txt` 不受影响，仍可直接喂给 AI 工具）。
+
 **Q: Windows 上怎么运行？**
 直接 `python bili_summary.py ...`（或 `py bili_summary.py ...`）即可，用法与 Linux 完全一致；首次运行会自动创建 `.venv` 并安装依赖。若已 `pip install .`，直接敲 `bili-summary` 命令（`.venv\Scripts\bili-summary.exe`）。
 
@@ -279,7 +296,8 @@ bili_summary/
 ├── pyproject.toml         # pip 打包/安装配置
 ├── README.md
 ├── LICENSE                # MIT
-└── .gitignore
+├── .gitignore
+└── .env.example           # 配置示例（复制为 .env 使用）
 ```
 
 ## 🛠 技术栈
