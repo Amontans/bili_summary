@@ -163,27 +163,49 @@ def cfg_flag(key):
     return os.environ.get(key, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+_device_explicit = False                 # 用户是否显式指定了设备（自动回退只作用于自动探测）
+
+
+def _cuda_usable():
+    """验证 CUDA 是否真的可用：设备计数 > 0 且 cuBLAS/cuDNN 运行库可加载。
+    ctranslate2 的 get_cuda_device_count() 在缺少驱动/运行库时可能误报，
+    缺 libcublas.so.12 会在转写时才崩溃，这里提前拦截。"""
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() <= 0:
+            return False
+    except Exception:
+        return False
+    import ctypes
+    for lib in ("libcublas.so.12", "libcudart.so.12", "libcublasLt.so.12"):
+        try:
+            ctypes.CDLL(lib)
+        except OSError:
+            return False
+    return True
+
+
 def detect_best_device():
-    """自动硬件加速：检测到 NVIDIA GPU → cuda+float16；否则 CPU+int8。
+    """自动硬件加速：检测到可用 NVIDIA GPU → cuda+float16；否则 CPU+int8。
     手动关闭：.env/环境变量设 WHISPER_DEVICE=cpu（强制 CPU）；设 cuda 则强制 GPU；auto=自动探测"""
-    global DEVICE, COMPUTE_TYPE
+    global DEVICE, COMPUTE_TYPE, _device_explicit
     explicit = os.environ.get("WHISPER_DEVICE", "").strip().lower()
     if explicit and explicit != "auto":            # 用户已显式指定（cpu/cuda），尊重之
+        _device_explicit = True
         DEVICE = explicit
         if os.environ.get("WHISPER_COMPUTE_TYPE"):
             COMPUTE_TYPE = os.environ["WHISPER_COMPUTE_TYPE"]
         return
-    try:
-        import ctranslate2
-        if ctranslate2.get_cuda_device_count() > 0:
-            DEVICE, COMPUTE_TYPE = "cuda", "float16"
-            os.environ["WHISPER_DEVICE"] = DEVICE
-            os.environ["WHISPER_COMPUTE_TYPE"] = COMPUTE_TYPE
-            log("🖥️ 检测到 NVIDIA GPU，已自动启用 CUDA 加速（float16）；如需关闭：.env 设 WHISPER_DEVICE=cpu")
-        else:
-            log("💻 未检测到 GPU，使用 CPU（int8）；有 NVIDIA 显卡可设 WHISPER_DEVICE=cuda 手动开启")
-    except Exception:
-        log("💻 GPU 检测不可用，使用 CPU（int8）")
+    if _cuda_usable():
+        DEVICE, COMPUTE_TYPE = "cuda", "float16"
+        os.environ["WHISPER_DEVICE"] = DEVICE
+        os.environ["WHISPER_COMPUTE_TYPE"] = COMPUTE_TYPE
+        log("🖥️ 检测到 NVIDIA GPU，已自动启用 CUDA 加速（float16）；如需关闭：.env 设 WHISPER_DEVICE=cpu")
+    else:
+        log("💻 未检测到可用 GPU（或无 CUDA 运行库），使用 CPU（int8）")
+        DEVICE, COMPUTE_TYPE = "cpu", "int8"
+        os.environ["WHISPER_DEVICE"] = DEVICE
+        os.environ["WHISPER_COMPUTE_TYPE"] = COMPUTE_TYPE
 
 
 def resolve_parallel(cli_value):
@@ -530,34 +552,54 @@ def write_srt(segs, path):
 
 
 def transcribe(audio_path, model, save_path, with_timestamps=False):
-    log("🎧 开始中文语音识别（小模型 CPU int8，请耐心等待）...")
+    log(f"🎧 开始语音识别（{DEVICE}/{COMPUTE_TYPE}，请耐心等待）...")
 
-    def _run(pass_no):
+    def _run(m, pass_no):
         """第1遍: 中文+VAD；第2遍: 自动语种+不过滤（兼容音乐/外语视频）"""
         if pass_no == 1:
-            segs, info = model.transcribe(
+            segs, info = m.transcribe(
                 audio_path, language="zh", vad_filter=True, beam_size=5,
                 vad_parameters=dict(min_silence_duration_ms=500),
             )
         else:
-            segs, info = model.transcribe(
+            segs, info = m.transcribe(
                 audio_path, language=None, vad_filter=False, beam_size=5,
                 condition_on_previous_text=False,
             )
         segs = list(segs)   # 物化分段（含时间戳，供 .srt 使用）
         return "".join(s.text for s in segs).strip(), info.duration, segs
 
-    def _run_zh():
-        return run_with_timeout(lambda: _run(1), TRANS_TIMEOUT, "语音识别")
+    def _run_zh(m):
+        return run_with_timeout(lambda: _run(m, 1), TRANS_TIMEOUT, "语音识别")
 
-    def _run_auto():
-        return run_with_timeout(lambda: _run(2), TRANS_TIMEOUT, "语音识别(自动语种)")
+    def _run_auto(m):
+        return run_with_timeout(lambda: _run(m, 2), TRANS_TIMEOUT, "语音识别(自动语种)")
 
-    text, duration, segs = with_retry(_run_zh, "语音识别(中文)", retries=1)
+    def _with_cuda_fallback(fn, m):
+        """自动探测到 CUDA 但运行库缺失/损坏时（如缺 libcublas.so.12），降级到 CPU 重试一次"""
+        global DEVICE, COMPUTE_TYPE
+        try:
+            return fn(m)
+        except Exception as e:
+            msg = str(e).lower()
+            if (DEVICE == "cuda" and not _device_explicit
+                    and any(k in msg for k in ("cublas", "cudnn", "cudart", "cublaslt", "cuda"))):
+                log(f"⚠️ 语音识别遇 CUDA 运行库故障（{e}），自动回退 CPU 重试...")
+                DEVICE, COMPUTE_TYPE = "cpu", "int8"
+                os.environ["WHISPER_DEVICE"] = DEVICE
+                os.environ["WHISPER_COMPUTE_TYPE"] = COMPUTE_TYPE
+                cpu_model = load_model(0)
+                _model_local.model = cpu_model
+                return fn(cpu_model)
+            raise
+
+    text, duration, segs = _with_cuda_fallback(
+        lambda m: with_retry(lambda: _run_zh(m), "语音识别(中文)", retries=1), model)
     min_chars = max(20, int(duration * 0.3))  # 按音频时长估算最低字数
     if len(text) < min_chars:
         log(f"⚠ 中文识别结果过短（{len(text)}字 / 音频{duration:.0f}s），尝试自动语种识别...")
-        text, duration, segs = with_retry(_run_auto, "语音识别(自动语种)", retries=1)
+        text, duration, segs = _with_cuda_fallback(
+            lambda m: with_retry(lambda: _run_auto(m), "语音识别(自动语种)", retries=1), model)
     text = text.strip()
     if len(text) < 10:
         raise RuntimeError("识别结果过短，音频可能为纯音乐或语音不清")
