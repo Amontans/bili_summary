@@ -26,6 +26,9 @@
 - ✅ **并行默认自动**：按 CPU 核数自动开启（上限 4 路，GPU 默认单路）；`-p 1` 或 `BILI_PARALLEL=1` 可手动关闭
 - ✅ **并行流水线**：下载预取与转写重叠，不再“下完一个才下下一个”；`-p N` 多路并行转写（CPU 线程自动分摊）
 - ✅ **断点续传**：`--skip-existing` 已转写过的视频直接跳过（只请求一次元数据，不重复下载），批量中断后重跑不浪费
+- ✅ **中断保护（v2.5）**：内存自适应并行 + 长音频分片 + 状态文件断点续传 + Ctrl+C/关终端优雅停止，被 OOM 杀掉、关终端、断网后重跑同一条命令即可续传（不重复下载/不重复转写）
+- ✅ **后台运行**：`--background` 把任务放到独立会话，关终端/断 SSH 也不中断，日志写 `logs/*.log`
+- ✅ **长音频分片**：直播回放等长音频自动按 30 分钟分片转写，内存占用恒定、逐片落盘（可通过 `BILI_CHUNK_SEC` 调整/关闭）
 - ✅ **字幕输出**：`--with-timestamps` 额外生成带时间戳的 `.srt` 字幕（与纯文本 `.txt` 并存）
 - ✅ **模型自由定制**：`WHISPER_SIZE` 任选 tiny/base/small/medium/large-v3 **或本地模型目录路径**；`HF_HOME` 自定义模型缓存位置（`--setup` 向导可一键设置）
 - ✅ 中文优先识别，失败自动切自动语种（兼容外语/音乐视频）
@@ -178,16 +181,19 @@ $ python bili_summary.py
 ## ⚙️ 用法
 
 ```text
-用法: python bili_summary.py [inputs...] [-i] [-f FILE] [-o OUTDIR] [-p N] [--no-summary] [--skip-existing] [--with-timestamps] [--keep-links] [--dry-run] [--setup] [--check]
+用法: python bili_summary.py [inputs...] [-i] [-f FILE] [-o OUTDIR] [-p N] [--no-summary] [--skip-existing] [--with-timestamps] [--keep-links] [--dry-run] [--setup] [--check] [-b] [--force] [--chunk-sec N]
 
   inputs            B站链接或BV号，可多个（无任何输入时自动进入交互模式）
   -i, --interactive 强制进入交互模式：逐行输入链接，空行开始处理
   -f, --file FILE   从文件读取链接列表（每行一个，# 开头为注释）
   -o, --outdir DIR  输出目录（默认 ./output）
-  -p, --parallel N  并行路数（默认自动：CPU 按核数上限4，GPU 单路；N>1 多路同时转写；手动关闭用 -p 1，配置键 BILI_PARALLEL）
+  -p, --parallel N  并行路数（默认自动：CPU 按核数与可用内存取小，GPU 单路；N>1 多路同时转写；手动关闭用 -p 1，配置键 BILI_PARALLEL）
   --no-summary      只转写，不调用 DeepSeek 总结（无需 API Key）
   --skip-existing   断点续传：已有同名转写文件则直接跳过（只请求一次元数据，不下载）
   --with-timestamps 额外生成带时间戳的 .srt 字幕（与纯文本 .txt 并存）
+  -b, --background  后台运行：独立会话（关终端/断 SSH 不中断），日志写 logs/*.log
+  --force           忽略断点续传状态，全部重做（默认已完成/已下载/已转写分片自动跳过）
+  --chunk-sec N     长音频分片秒数（0=关闭；默认 1800=每片30分钟，仅长音频分片）
   --keep-links      交互模式结束后保留 links.txt（默认自动删除）
   --dry-run         只预览：显示归一化 URL、抓取视频标题与输出文件名（不下载/不转写/不调AI）
   --setup           一键配置向导（API Key / 模型镜像 / 模型预下载）
@@ -234,7 +240,9 @@ output/                                ← -o 指定（默认 ./output）
 ├── 视频标题.summary.txt               ← ② AI 总结（仅开启总结时）
 ├── 另一个视频标题.txt
 ├── summaries.md                       ← ③ 全量汇总（仅开启总结时）
-└── report.md                          ← ④ 处理报告（成功/跳过/失败，始终生成）
+├── report.md                          ← ④ 处理报告（成功/跳过/失败/未完成，始终生成）
+├── .bili_state.json                   ← ⑤ 断点续传状态（已完成清单；重跑时秒级跳过）
+└── .bili_cache/<BV号>/                ← ⑥ 音频与分片进度缓存（续跑免下载；成功后自动删）
 ```
 
 **文件名 = 视频标题**：自动去非法字符、压缩空白、截断 80 字；同批重名自动加 `_2`/`_3`；抓不到标题时回退为视频 ID。重复运行同一视频会**覆盖**同名文件，不同视频互不干扰。
@@ -313,8 +321,14 @@ $ python bili_summary.py --config
 | `HF_HOME` | 模型缓存目录（自定义“模型安装位置”；Windows/Linux 均自动展开 `~`） | 默认 `~/.cache/huggingface` |
 | `BILI_OUTPUT_DIR` | 默认输出目录 | `./output` |
 | `BILI_VENV_DIR` | 虚拟环境目录（须为真实环境变量） | `脚本目录/.venv` |
-| `BILI_PARALLEL` | 并行路数：`auto`=按核数自动（上限4，GPU单路），`1`=关闭并行，`N`=固定N路 | `auto` |
-| `BILI_SKIP_EXISTING` | `1`=断点续传，跳过已转写视频（等价 `--skip-existing`） | `0` |
+| `BILI_PARALLEL` | 并行路数：`auto`=按核数与可用内存自动（上限4，GPU单路），`1`=关闭并行，`N`=固定N路 | `auto` |
+| `BILI_SKIP_EXISTING` | `1`=断点续传，跳过已转写视频（等价 `--skip-existing`；新版默认已按状态自动跳过） | `0` |
+| `BILI_CHUNK_SEC` | 长音频分片秒数（`0`=关闭分片；长直播回放建议 1800） | `1800` |
+| `BILI_CHUNK_THRESHOLD` | 超过该时长（秒）的音频才分片 | `2400` |
+| `BILI_MEM_PER_WORKER_GB` | 每路转写内存预算（GB），自动并行按它推算路数 | `1.5` |
+| `BILI_MEM_RESERVE_GB` | 给系统预留内存（GB），不足时暂停新增并行任务 | `1.0` |
+| `BILI_MIN_DISK_MB` | 下载前要求的最小磁盘剩余（MB） | `600` |
+| `BILI_KEEP_CACHE` | `1`=转写完成后也保留音频缓存（便于重跑/排查） | `0` |
 | `BILI_WITH_TIMESTAMPS` | `1`=额外生成 `.srt` 字幕（等价 `--with-timestamps`） | `0` |
 | `BILI_NO_SUMMARY` | `1`=只转写不调 AI（等价 `--no-summary`） | `0` |
 
@@ -344,7 +358,8 @@ Debian/Ubuntu 可能需要先装 `python3-venv`（`sudo apt install python3-venv
 不需要，转写全程本地完成，不调用任何云 API。
 
 **Q: 转写很慢，怎么并行加速？**
-默认已自动并行：按 CPU 核数开启（上限 4 路），下载也会提前预取与转写重叠。要调整用 `-p N`（或 `.env` 的 `BILI_PARALLEL`）：CPU 用户建议 `-p 2`~`-p 3`（每路模型约占 500MB~1GB 内存）；GPU 用户保持自动（单路）。
+默认已自动并行：按 CPU 核数与可用内存取小（上限 4 路），下载也会提前预取与转写重叠。想固定路数用 `-p N`（或 `.env` 的 `BILI_PARALLEL`）。
+每路 whisper 实例约占 0.5~1.5 GB 内存，固定值高于内存建议值时程序会提醒；内存告急时新任务会自动排队等，而不是硬上被系统杀掉。
 
 **Q: 有 NVIDIA 显卡，会自动用 GPU 吗？**
 会。启动时自动检测，检测到即用 `cuda+float16`，无需配置。想关闭：`.env` 设 `WHISPER_DEVICE=cpu`。
@@ -353,7 +368,24 @@ Debian/Ubuntu 可能需要先装 `python3-venv`（`sudo apt install python3-venv
 直接改项目目录 `.env`：`BILI_SKIP_EXISTING=1`、`BILI_WITH_TIMESTAMPS=1`，之后每次运行自动生效；命令行再给出时以命令行优先。
 
 **Q: 批量处理中断了，能续跑吗？**
-加 `--skip-existing` 重跑：已生成的转写文件会被跳过，只处理缺失的，且只请求一次元数据、不重复下载。
+能，**直接重跑同一条命令即可**（不需要额外参数）：
+- 已完成的视频 → 秒级跳过（读 `output/.bili_state.json`，不联网、不下载）
+- 下到一半的音频 → yt-dlp 断点续传接着下（缓存在 `output/.bili_cache/`）
+- 长音频已转写好的分片 → 从下一片继续，不重做
+
+想全部重做：加 `--force`（或删掉 `output/.bili_state.json`）。
+
+**Q: 跑到一半进程被系统 Killed（内存不足）怎么办？**
+v2.5 已内置三层保护：①自动并行按可用内存下调；②内存告急时暂停启动新任务；③长音频分片转写（内存恒定，直播回放不再吃几个 GB）。
+即使仍被 OOM 杀掉，进度也已落盘：重跑同一条命令自动续传，不会白跑。机器内存较小（≤8 GB）建议 `-p 1`。
+
+**Q: 关掉终端 / SSH 断了会中断吗？**
+Ctrl+C、`kill`、关终端（SIGINT/SIGTERM/SIGHUP）都会触发**优雅停止**：不再接新任务，当前分片收尾后退出，进度与缓存全部保留；
+想彻底不受终端影响用 `bili-summary --background -f links.txt`（日志在 `logs/`，`kill <PID>` 也能优雅停止）。
+
+**Q: 长视频（直播回放 2~3 小时）怎么处理更稳？**
+默认超过 40 分钟的音频会自动按 30 分钟分片转写：内存恒定、每片完成即落盘，中断只重做当前片。
+分片长度可用 `--chunk-sec 1200` 或 `.env` 的 `BILI_CHUNK_SEC` 调整；关闭分片用 `BILI_CHUNK_SEC=0`。
 
 **Q: 想要带时间戳的字幕？**
 加 `--with-timestamps`，每个视频会额外生成同名 `.srt` 字幕（纯文本 `.txt` 不受影响，仍可直接喂给 AI 工具）。

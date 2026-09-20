@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bili-summary"
-version = "2.4.1"
+version = "2.5.0"
 description = "B站视频一键转文字稿（可选 AI 总结）：yt-dlp 下载音频 → faster-whisper 转写 → 可选 DeepSeek 总结"
 readme = "README.md"
 requires-python = ">=3.9"  # yt-dlp / faster-whisper 新版均要求 Python 3.9+

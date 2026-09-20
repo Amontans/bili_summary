@@ -16,9 +16,17 @@ transcripts/
 
 # 用户数据（交互模式生成的链接列表，退出自动删除）
 links.txt
+links.txt.bak
+
+# 运行日志（--background / 旧版批处理）
+logs/
+batch.log
 
 # 配置（--setup 生成，含 API Key）
 .env
+
+# pi agent 会话状态（本地）
+.pi/
 
 # 系统文件
 .DS_Store
