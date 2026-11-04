@@ -128,6 +128,17 @@ class VisualNote:
         )
 
 
+def finish_reason_of(data: Any) -> str:
+    try:
+        return str(data["choices"][0].get("finish_reason") or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+class TruncatedOutput(VisionError):
+    """输出被 max_tokens 截断（finish_reason=length）。"""
+
+
 def _extract_json(text: str) -> Optional[dict]:
     """从模型输出里尽量挖出 JSON（容忍 ```json 包裹与前后废话）。"""
     if not text:
@@ -153,6 +164,14 @@ def _message_text(data: Any) -> str:
         raise VisionError(f"响应格式异常: {str(data)[:300]}")
     # 推理模型常见故障：token 预算被 reasoning_content 吃光，content 为空
     finish = str(choice.get("finish_reason") or "")
+    if finish == "length":
+        usage = data.get("usage") or {}
+        detail = usage.get("completion_tokens_details") or {}
+        r = detail.get("reasoning_tokens", 0)
+        partial = (msg.get("content") or "").strip()
+        raise TruncatedOutput(
+            f"输出被截断（finish_reason=length，reasoning_tokens={r}，"
+            f"已产出 {len(partial)} 字）。需要调大 max_tokens 或关掉思考。")
     if not (msg.get("content") or "").strip() and finish == "length":
         usage = data.get("usage") or {}
         detail = usage.get("completion_tokens_details") or {}
@@ -198,8 +217,8 @@ class VisionModel:
         models = [model or self.prov.model]
         if self.prov.fallback_model and self.prov.fallback_model != models[0]:
             models.append(self.prov.fallback_model)
-
         extra = thinking_fields(self.cfg, task="vision")
+
         last: Optional[Exception] = None
         for i, mdl in enumerate(models):
             payload = {
@@ -209,18 +228,27 @@ class VisionModel:
                 "max_tokens": max_tokens,
                 **extra,
             }
-            for attempt in range(max(1, self.cfg.retries)):
+            truncations = 0        # 截断重试有独立预算，不吃普通重试次数
+            for attempt in range(3):
                 try:
                     data = _http.post_json(url, payload, headers=hdr,
                                            timeout=self.prov.timeout, retries=1)
                     return _message_text(data).strip()
+                except TruncatedOutput as e:
+                    last = e
+                    if truncations < 2 and payload["max_tokens"] < 16384:
+                        truncations += 1
+                        payload["max_tokens"] = min(16384, payload["max_tokens"] * 2)
+                        self.log(f"↪ 输出被截断，max_tokens → {payload['max_tokens']} 重试")
+                        continue
+                    raise
                 except Exception as e:
                     last = e
                     # 某些端点不认识 thinking/reasoning_effort → 去掉再试
-                    if any(k in payload for k in _STRIP_ON_400) and \
-                            any(w in str(e).lower() for w in ("unrecognized", "unknown",
-                                                              "unsupported", "invalid_request",
-                                                              "extra", "400")):
+                    if any(k in payload for k in _STRIP_ON_400) and any(
+                            w in str(e).lower() for w in
+                            ("unrecognized", "unknown", "unsupported", "invalid_request",
+                             "extra", "400")):
                         for k in _STRIP_ON_400:
                             payload.pop(k, None)
                         self.log("↪ 端点不支持 thinking 参数，已去掉重试")
@@ -230,7 +258,7 @@ class VisionModel:
                                               or "-2013" in msg or "not found" in msg)
                     if looks_like_model_error and i + 1 < len(models):
                         self.log(f"↪ 模型 {mdl} 不可用，改用 {models[i + 1]}")
-                        break                      # 直接换下一个模型，不占重试次数
+                        break
                     if attempt + 1 < self.cfg.retries:
                         time.sleep(1.2 * (attempt + 1))
         raise VisionError(f"视觉模型调用失败: {last}")

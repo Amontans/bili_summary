@@ -382,6 +382,55 @@ class TestWhisperCpp(unittest.TestCase):
             os.chdir(cwd)
 
 
+class TestTruncationRetry(unittest.TestCase):
+    """输出被 max_tokens 截断时必须自动加大预算重试，而不是交出半份报告。"""
+
+    def _srv(self):
+        from mock_vlm import MockServer
+        return MockServer()
+
+    def test_vision_retries_with_bigger_budget(self):
+        import json as _json
+
+        from aicbili.vision import VisionModel
+
+        with self._srv() as srv:
+            cfg = Config.load()
+            cfg.retries = 1          # 最容易踩坑：普通重试只有 1 次
+            cfg.vlm.api_key = "k"
+            cfg.vlm.base_url = srv.base_url
+            cfg.vlm.model = "m"
+            srv.state.reply_image = _json.dumps(
+                {"frames": [{"i": 1, "kind": "x", "text": "ok"}], "gist": "g"})
+            srv.state.truncate_below = 4000
+            note = VisionModel(cfg, log=lambda m: None).describe_sheet(
+                b"\xff\xd8\xff\xd9", [0.0], title="t")
+            self.assertEqual(note.items[0].text, "ok")
+            budgets = [q["body"].get("max_tokens") for q in srv.state.requests]
+            self.assertEqual(budgets, [1800, 3600, 7200])
+
+    def test_truncated_output_raises_when_budget_exhausted(self):
+        from aicbili.vision import TruncatedOutput, VisionModel
+
+        with self._srv() as srv:
+            cfg = Config.load()
+            cfg.retries = 1
+            cfg.vlm.api_key = "k"
+            cfg.vlm.base_url = srv.base_url
+            cfg.vlm.model = "m"
+            srv.state.truncate_below = 999999      # 永远截断
+            with self.assertRaises(TruncatedOutput):
+                VisionModel(cfg, log=lambda m: None).describe_sheet(
+                    b"\xff\xd8\xff\xd9", [0.0], title="t")
+
+    def test_finish_reason_of_helper(self):
+        from aicbili.vision import finish_reason_of
+
+        self.assertEqual(finish_reason_of(
+            {"choices": [{"finish_reason": "length", "message": {}}]}), "length")
+        self.assertEqual(finish_reason_of({}), "")
+
+
 class TestMultimodalProbe(unittest.TestCase):
     """doctor 要能分辨「真能看图」和「纯文本模型」。"""
 

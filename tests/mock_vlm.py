@@ -18,6 +18,8 @@ class MockState:
         self.reply_text = ""      # 纯文本请求用这条
         self.status = 200
         self.fail_models: set = set()   # 这些模型名返回 404
+        # 小于该 max_tokens 时返回 finish_reason=length（模拟输出被截断）
+        self.truncate_below: int = 0
         self.lock = threading.Lock()
 
     def reset(self) -> None:
@@ -65,11 +67,13 @@ def make_handler(state: MockState):
                 reply = (state.reply_image if has_media else state.reply_text) or state.reply
                 if isinstance(payload, dict) and payload.get("model") in state.fail_models:
                     status, reply = 404, '{"error":{"message":"model not found"}}' 
+            mt = int((payload or {}).get("max_tokens") or 0) if isinstance(payload, dict) else 0
+            finish = "length" if (state.truncate_below and mt < state.truncate_below) else "stop"
             body = json.dumps({
                 "id": "chatcmpl-mock",
                 "object": "chat.completion",
                 "model": (payload.get("model") if isinstance(payload, dict) else "mock"),
-                "choices": [{"index": 0, "finish_reason": "stop",
+                "choices": [{"index": 0, "finish_reason": finish,
                              "message": {"role": "assistant", "content": reply}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             }).encode("utf-8")

@@ -109,35 +109,45 @@ def align_timeline(transcript: Optional[Transcript], visual: Optional[VisualNote
 # 文本模型调用
 # --------------------------------------------------------------------------
 def _chat(prov: Provider, system: str, user: str, *, cfg: Config,
-          max_tokens: int = 4000, log=print) -> str:
+          max_tokens: int = 8000, log=print) -> str:
     from .http import post_json
-    from .vision import _message_text, thinking_fields
+    from .vision import TruncatedOutput, _message_text, thinking_fields
 
     url = prov.base_url.rstrip("/") + "/chat/completions"
     hdr = {"Authorization": f"Bearer {prov.api_key}"}
     models = [prov.model] + ([prov.fallback_model] if prov.fallback_model else [])
     last: Optional[Exception] = None
     for model in models:
-        for attempt in range(max(1, cfg.retries)):
+        payload = {
+            "model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+            **thinking_fields(cfg, task="summary"),
+        }
+        truncations = 0
+        for attempt in range(3):
             try:
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "system", "content": system},
-                                 {"role": "user", "content": user}],
-                    "temperature": 0.3,
-                    "max_tokens": max_tokens,
-                    **thinking_fields(cfg, task="summary"),
-                }
                 data = post_json(url, payload, headers=hdr,
                                  timeout=prov.timeout, retries=1)
                 return _message_text(data).strip()
+            except TruncatedOutput as e:
+                last = e
+                if truncations < 2 and payload["max_tokens"] < 16384:
+                    truncations += 1
+                    payload["max_tokens"] = min(16384, payload["max_tokens"] * 2)
+                    log(f"↪ 报告被截断，max_tokens → {payload['max_tokens']} 重试")
+                    continue
+                raise
             except Exception as e:
                 last = e
                 msg = str(e).lower()
                 if "model" in msg or "404" in msg:
                     log(f"↪ 文本模型 {model} 不可用，尝试备选")
                     break
-                time.sleep(1.2 * (attempt + 1))
+                if attempt + 1 < cfg.retries:
+                    time.sleep(1.2 * (attempt + 1))
     raise RuntimeError(f"总结模型调用失败: {last}")
 
 
@@ -165,7 +175,8 @@ def summarize_material(material: str, cfg: Config, log=print) -> str:
     chunks = _split_material(material)
     if len(chunks) == 1:
         log(f"🤖 生成笔记（材料 {len(material)} 字）...")
-        return _chat(prov, SYS_PROMPT, FINAL_PROMPT.format(material=material), cfg=cfg, log=log)
+        return _chat(prov, SYS_PROMPT, FINAL_PROMPT.format(material=material),
+                     cfg=cfg, max_tokens=8000, log=log)
 
     log(f"📑 材料 {len(material)} 字，分 {len(chunks)} 段提炼后合并")
     parts: List[str] = []
@@ -177,7 +188,7 @@ def summarize_material(material: str, cfg: Config, log=print) -> str:
     merged = "\n\n".join(f"### 第{i}段\n{p}" for i, p in enumerate(parts, 1))
     log("🧩 合并分段要点，生成最终笔记...")
     return _chat(prov, SYS_PROMPT, FINAL_PROMPT.format(material=merged),
-                 cfg=cfg, max_tokens=4000, log=log)
+                 cfg=cfg, max_tokens=12000, log=log)
 
 
 __all__ = ["align_timeline", "summarize_material", "SYS_PROMPT", "FINAL_PROMPT"]
