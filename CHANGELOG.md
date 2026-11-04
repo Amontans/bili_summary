@@ -1,0 +1,40 @@
+# 更新日志
+
+## v3.0.0 — 让 AI 真正「看」B站视频
+
+彻底重写。从「只听声音」升级为「画面 + 语音」双通道，并大幅提速。
+包名改为 `aicbili`，旧版单文件实现保留在 `legacy/bili_summary_v2.py`。
+
+### 新增
+
+- **画面理解**：抽帧 → 拼图 → 多模态模型，能读到 PPT、代码、图表、界面操作
+- **完全不下载视频**：视频流用 ffmpeg 对远端 DASH 地址做 HTTP Range 定位抽取，
+  单帧 20~40KB；16 分钟视频抽 24 帧共 769KB / 11.7s
+- **B站快照场景检测**：用预生成雪碧图（约 1MB / 近 200 帧）算帧间差异，
+  只在画面真正变化处抽高清帧（顺序读整条流需 72.6s，此方案 3.3s）
+- **`--mode native`**：把远端视频地址直接交给模型原生读取，1 次调用、0 下载
+  （需要地址匿名可达，或配 `--relay` 自建补 Referer 的反转代理）
+- **B站 AI 字幕优先**：配 `SESSDATA` 后可直接拿到全文，跳过整个 ASR（<1s）
+- **三种转写后端**：B站字幕 / 云端 ASR / 本地 whisper.cpp 与 faster-whisper
+- **多模态能力自检**：`aicbili doctor` 会真发一张图，确认「这个 Key 到底能不能看图」
+- **推理模型支持**：自动关闭 DeepSeek 等模型的思维链（`AICBILI_THINKING`），
+  避免 token 被 `reasoning_content` 吃光导致空输出
+- **零安装**：`bin/aicbili` 启动器 + `Makefile`，绕开 PEP 668 与缺失 setuptools
+
+### 改进
+
+- 语音腿与画面腿**完全并行**，总耗时 ≈ max(两者) 而非相加
+- 音频分窗并发 + CDN 测速 + 卡死自动换节点（B站 CDN 会给出只握手不出数据的节点）
+- 输出结构化 `.md` 报告，含一句话总结 / 带时间的大纲 / 核心知识点 / **画面证据** / 逐帧记录
+- 断点复用：已完成的视频秒级跳过（`--force` 重做）
+
+### 变更
+
+- 依赖从 `yt-dlp + faster-whisper + openai + imageio-ffmpeg` 缩减为**仅 Pillow**
+- 不再走 yt-dlp 下载音频，改为直接解析 `playurl` 的 DASH 地址
+- 接口变化：`bili_summary.py <url>` → `aicbili <url>`；详细参数对照见 README「从 bili_summary 迁移」
+
+### 移除
+
+- `--setup` 设置向导、`register-cli` 全局命令注册（改为直接编辑 `.env` / `make link`）
+- 超长音频的 whisper 分片与内存看门狗（改用云端 ASR 或 B站字幕，通常不再需要）

@@ -3,29 +3,36 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bili-summary"
-version = "2.5.0"
-description = "B站视频一键转文字稿（可选 AI 总结）：yt-dlp 下载音频 → faster-whisper 转写 → 可选 DeepSeek 总结"
+name = "aicbili"
+version = "3.0.0"
+description = "让 AI 真正「看」B站视频：远程抽帧 + 音频转写 + 多模态总结，全程不下载完整视频"
 readme = "README.md"
-requires-python = ">=3.9"  # yt-dlp / faster-whisper 新版均要求 Python 3.9+
-license = {text = "MIT"}
-authors = [{name = "Amontans"}]
-keywords = ["bilibili", "whisper", "transcript", "summary", "yt-dlp", "asr"]
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Amontans" }]
+keywords = ["bilibili", "video-understanding", "vlm", "transcript", "asr", "multimodal"]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Topic :: Multimedia :: Sound/Audio :: Speech",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Multimedia :: Video",
 ]
+# 只用标准库发 HTTP 请求；Pillow 仅用于把多帧拼成一张图
 dependencies = [
-    "yt-dlp",
-    "faster-whisper",
-    "openai",
-    "imageio-ffmpeg",
+  "pillow>=9.0",
 ]
+
+[project.optional-dependencies]
+# 本地语音转写（可选：也可以用云端 ASR 或 B站自带字幕，无需安装）
+local-asr = ["faster-whisper>=1.0"]
+dev = ["pytest>=7"]
 
 [project.scripts]
-bili-summary = "bili_summary:main"
+aicbili = "aicbili.cli:main"
 
-[tool.setuptools]
-py-modules = ["bili_summary"]
+[tool.setuptools.packages.find]
+include = ["aicbili*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: 需要联网访问 B站 API 的集成测试"]

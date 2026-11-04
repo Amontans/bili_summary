@@ -1,0 +1,39 @@
+#!/bin/sh
+# aicbili 启动器 —— 不需要 pip install。
+#
+# 项目除 Pillow 外无第三方依赖，而 Arch/Fedora 等系统 Python 通常已自带 Pillow，
+# 所以直接跑就行。本脚本只是把「项目根目录」加进 PYTHONPATH 并转发参数，
+# 这样在任何目录下都能用 aicbili，且不用碰受 PEP 668 保护的系统环境。
+set -e
+
+# 跟随符号链接，找到脚本真实位置
+SELF="$0"
+while [ -L "$SELF" ]; do
+    DIR=$(cd -P "$(dirname "$SELF")" >/dev/null 2>&1 && pwd)
+    SELF=$(readlink "$SELF")
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$DIR/$SELF" ;;
+    esac
+done
+ROOT=$(cd -P "$(dirname "$SELF")/.." >/dev/null 2>&1 && pwd)
+
+# 允许用环境变量指定解释器（比如某个装了 faster-whisper 的 venv）
+PY="${AICBILI_PYTHON:-python3}"
+
+if ! command -v "$PY" >/dev/null 2>&1; then
+    echo "aicbili: 找不到 Python 解释器 '$PY'" >&2
+    echo "提示：可用 AICBILI_PYTHON=/path/to/python 指定" >&2
+    exit 127
+fi
+
+# Pillow 是唯一硬依赖，缺了给一条能直接照抄的命令
+if ! "$PY" -c "import PIL" >/dev/null 2>&1; then
+    echo "aicbili: 缺少 Pillow（拼图需要）" >&2
+    echo "  Arch:   sudo pacman -S python-pillow" >&2
+    echo "  Debian: sudo apt install python3-pil" >&2
+    echo "  或者:   python3 -m venv .venv && .venv/bin/pip install pillow" >&2
+    exit 1
+fi
+
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m aicbili "$@"
