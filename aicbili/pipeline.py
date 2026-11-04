@@ -217,7 +217,8 @@ class Analyzer:
         if native_only:
             res.summary = visual.items[0].text if visual.items else ""
             self.log("  ⏩ 原生直读已产出结构化结果，跳过二次总结")
-        elif not dry_run and not no_ai and (transcript or visual) and timeline:
+        elif (not dry_run and not no_ai and not media.stop_requested()
+              and (transcript or visual) and timeline):
             t0 = time.time()
             try:
                 res.summary = summarize.summarize_material(timeline, self.cfg, log=self.log)
@@ -282,6 +283,13 @@ class Analyzer:
 
         if astream is None:
             self.log("  ⚠ 没有音频流，无法转写")
+            return None
+
+        # 抽音频前先确认「有没有能用的转写后端」——没有就别白下几 MB
+        backends = asr.available_backends(self.cfg)
+        if not backends:
+            self.log("  ⏭ 没有可用的转写后端，跳过音频抽取（不浪费流量）")
+            self.log("     想要文稿：配 SESSDATA 用 B站字幕，或 sudo pacman -S whisper-cpp")
             return None
 
         # 2) 抽音频 → 转写
@@ -412,13 +420,28 @@ class Analyzer:
                                      quality=cfg.jpeg_quality, user_agent=cfg.user_agent)
                 return ts, Image.open(out).convert("RGB")
             except Exception as e:
+                if media.stop_requested():
+                    return None          # 用户中断，不是错误，别刷屏
                 self.log(f"  ⚠ 抽帧 @{int(ts)}s 失败: {e}")
                 return None
 
-        with cf.ThreadPoolExecutor(max_workers=max(1, cfg.concurrency)) as ex:
-            for item in ex.map(_grab, timestamps):
+        ex = cf.ThreadPoolExecutor(max_workers=max(1, cfg.concurrency))
+        try:
+            futs = {ex.submit(_grab, ts): ts for ts in timestamps}
+            for fut in cf.as_completed(futs):
+                if media.stop_requested():
+                    break
+                try:
+                    item = fut.result()
+                except Exception:
+                    item = None
                 if item:
                     shots.append(item)
+        finally:
+            # 中断时把还没跑的任务取消掉，避免继续提交/刷屏
+            for f in list(futs):
+                f.cancel()
+            ex.shutdown(wait=True, cancel_futures=True)
         shots.sort(key=lambda x: x[0])
         self.log(f"  📸 抽 {len(shots)}/{len(timestamps)} 帧，用时 {time.time() - t0:.1f}s"
                  f"（共 {sum((frames_dir / f'f{int(t):05d}.jpg').stat().st_size for t, _ in shots) // 1024} KB）")
@@ -447,13 +470,20 @@ class Analyzer:
             return self.vlm.describe_sheet(payload, ts_list, title=video.title)
 
         t0 = time.time()
-        with cf.ThreadPoolExecutor(max_workers=max(1, min(4, cfg.concurrency))) as ex:
-            futs = [ex.submit(_describe, s) for s in sheets]
+        ex2 = cf.ThreadPoolExecutor(max_workers=max(1, min(4, cfg.concurrency)))
+        try:
+            futs = [ex2.submit(_describe, s) for s in sheets]
             for f in cf.as_completed(futs):
+                if media.stop_requested():
+                    break
                 try:
                     note = note.merge(f.result())
                 except Exception as e:
                     self.log(f"  ⚠ 视觉请求失败: {e}")
+        finally:
+            for f in futs:
+                f.cancel()
+            ex2.shutdown(wait=True, cancel_futures=True)
         note.elapsed = time.time() - leg_t0    # 含快照、抽帧、视觉调用全过程
         self.log(f"  👁 视觉理解完成：{len(note.items)} 条笔记"
                  f"（{len(sheets)} 张拼图，画面腿共 {note.elapsed:.1f}s）")

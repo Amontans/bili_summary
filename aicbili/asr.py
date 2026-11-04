@@ -315,6 +315,31 @@ def transcribe_whisper_cpp(audio_path: str, cfg: Config, log=print) -> Transcrip
                       elapsed=time.time() - t0)
 
 
+def available_backends(cfg: Config) -> List[str]:
+    """列出当前环境下**真的能用**的转写后端（不联网、不下载）。
+
+    用途：在没有字幕的视频上，先判断「下了音频有没有意义」，
+    避免白白下载几 MB 音频才发现根本转写不了。
+    """
+    out: List[str] = []
+    base = (cfg.vlm.base_url or "").lower()
+    if cfg.asr_backend == "openai":
+        return ["openai"] if cfg.vlm.api_key else []
+    if cfg.asr_backend in ("whisper_cpp", "whisper-cpp", "cpp"):
+        return ["whisper_cpp"] if (whisper_cpp_bin()
+                                   and find_whisper_cpp_model(cfg.whisper_cpp_model)) else []
+    if cfg.asr_backend == "local":
+        return ["local"] if local_available() else []
+    # auto
+    if cfg.vlm.api_key and "deepseek" not in base:
+        out.append("openai")
+    if whisper_cpp_bin() and find_whisper_cpp_model(cfg.whisper_cpp_model):
+        out.append("whisper_cpp")
+    if local_available():
+        out.append("local")
+    return out
+
+
 def transcribe(audio_path: str, cfg: Config, log=print) -> Transcript:
     """按配置选择后端转写本地音频。"""
     backend = cfg.asr_backend
@@ -350,7 +375,7 @@ def transcribe(audio_path: str, cfg: Config, log=print) -> Transcript:
 
 
 __all__ = [
-    "Segment", "Transcript", "find_whisper_cpp_model", "fmt_srt_ts", "fmt_ts",
+    "Segment", "Transcript", "available_backends", "find_whisper_cpp_model", "fmt_srt_ts", "fmt_ts",
     "from_cues", "local_available", "transcribe", "transcribe_local",
     "transcribe_openai", "transcribe_whisper_cpp", "whisper_cpp_bin", "write_srt",
 ]

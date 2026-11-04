@@ -24,13 +24,47 @@ from .bili import REFERER, Stream
 
 STOP = threading.Event()
 
+# 全局网络并发闸门：不管是几个视频、多少线程，同时打到 B站 CDN 的连接数封顶。
+# 实测 30 条并发会把 CDN 打崩（821 KB/s → 23 KB/s），所以这是必须的。
+_CONN_SEM = threading.BoundedSemaphore(8)
+
+
+def configure_global_limit(n: int) -> None:
+    """设置全局网络并发上限（在所有视频之间共享）。"""
+    global _CONN_SEM
+    _CONN_SEM = threading.BoundedSemaphore(max(1, int(n)))
+
+
+def _conn_slot():
+    return _CONN_SEM
+
 
 class FFmpegError(RuntimeError):
     pass
 
 
+# 正在跑的 ffmpeg 子进程 PID，中断时要一并杀掉，否则会留下孤儿进程
+_LIVE_PROCS: set = set()
+_LIVE_LOCK = threading.Lock()
+
+
+def kill_children() -> None:
+    """杀掉所有在跑的 ffmpeg 子进程（中断/退出时调用）。"""
+    import signal as _sig
+
+    with _LIVE_LOCK:
+        pids = list(_LIVE_PROCS)
+        _LIVE_PROCS.clear()
+    for pid in pids:
+        try:
+            os.kill(pid, _sig.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 def request_stop() -> None:
     STOP.set()
+    kill_children()
 
 
 def stop_requested() -> bool:
@@ -96,10 +130,13 @@ def _run(cmd: Sequence[str], timeout: float = 180.0, tag: str = "ffmpeg",
         text=True,
         errors="replace",
     )
+    with _LIVE_LOCK:
+        _LIVE_PROCS.add(proc.pid)
     t0 = time.time()
     last_size = -1
     last_progress = t0
-    while True:
+    try:
+      while True:
         if proc.poll() is not None:
             break
         if stop_requested():
@@ -122,6 +159,11 @@ def _run(cmd: Sequence[str], timeout: float = 180.0, tag: str = "ffmpeg",
                 proc.communicate()
                 raise FFmpegError(f"{tag} 卡住：{stall_secs:.0f}s 无数据增长（已丢弃该节点）")
         time.sleep(0.2)
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_PROCS.discard(proc.pid)
+        if proc.poll() is None:
+            proc.kill()
     _, err = proc.communicate()
     if proc.returncode != 0:
         tail = (err or "").strip().splitlines()[-6:]
@@ -159,7 +201,8 @@ def grab_frame(stream: Stream, ts: float, out_path: str, *, width: int = 1280,
         cmd += ["-vf", f"scale='min({width},iw)':-2:flags=lanczos", "-q:v", str(quality)]
         cmd += ["-f", "image2", out_path]
         try:
-            _run(cmd, timeout=timeout, tag=f"抽帧@{ts:.0f}s")
+            with _conn_slot():
+                _run(cmd, timeout=timeout, tag=f"抽帧@{ts:.0f}s")
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 return MediaResult(out_path, ts, os.path.getsize(out_path))
             last_err = FFmpegError("抽帧产出为空")
@@ -218,7 +261,8 @@ def download_bytes(url: str, *, user_agent: str = "", timeout: float = 60.0,
 
     hdr = {"User-Agent": user_agent or "Mozilla/5.0", "Referer": REFERER}
     try:
-        return _http.get_bytes(url, headers=hdr, timeout=timeout, retries=retries)
+        with _conn_slot():
+            return _http.get_bytes(url, headers=hdr, timeout=timeout, retries=retries)
     except Exception as e:
         raise FFmpegError(f"下载失败 {url[:80]}: {e}") from e
 
@@ -308,8 +352,9 @@ def extract_audio_parallel(stream: Stream, out_path: str, duration: float, *,
                     "-vn", "-sn", "-dn", "-ac", "1", "-ar", str(sample_rate),
                     "-c:a", "libmp3lame", "-b:a", bitrate, "-f", "mp3", str(dst)]
             try:
-                _run(cmd, timeout=timeout, tag=f"音频窗口{i}",
-                     watch_path=str(dst), stall_secs=stall_secs)
+                with _conn_slot():
+                    _run(cmd, timeout=timeout, tag=f"音频窗口{i}",
+                         watch_path=str(dst), stall_secs=stall_secs)
                 if dst.exists() and dst.stat().st_size > 1024:
                     return str(dst)
             except FFmpegError as e:
@@ -346,7 +391,8 @@ def extract_audio_parallel(stream: Stream, out_path: str, duration: float, *,
 
 
 __all__ = [
-    "FFmpegError", "MediaResult", "STOP", "download_bytes", "extract_audio",
+    "FFmpegError", "MediaResult", "STOP", "configure_global_limit", "download_bytes",
+    "extract_audio", "kill_children",
     "extract_audio_parallel", "ffmpeg_path", "grab_frame", "has_ffmpeg",
     "http_header_arg", "probe_anonymous", "rank_urls", "referer_free_url",
     "relay_url", "request_stop", "stop_requested",

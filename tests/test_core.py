@@ -318,6 +318,91 @@ json.dump({"result": {"language": "zh"}, "transcription": [
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "需要 ffmpeg")
+class TestBackendDetection(unittest.TestCase):
+    """没有转写后端时必须提前发现，否则会白下几 MB 音频。"""
+
+    def test_none_available(self):
+        from unittest import mock
+
+        from aicbili import asr
+
+        cfg = Config.load()
+        cfg.asr_backend = "auto"
+        cfg.vlm.api_key = "k"
+        cfg.vlm.base_url = "https://api.deepseek.com/v1"   # 没有 ASR 端点
+        with mock.patch.object(asr, "whisper_cpp_bin", return_value=None), \
+             mock.patch.object(asr, "local_available", return_value=False):
+            self.assertEqual(asr.available_backends(cfg), [])
+
+    def test_openai_skipped_for_deepseek(self):
+        from unittest import mock
+
+        from aicbili import asr
+
+        cfg = Config.load()
+        cfg.asr_backend = "auto"
+        cfg.vlm.api_key = "k"
+        cfg.vlm.base_url = "https://api.deepseek.com/v1"
+        with mock.patch.object(asr, "whisper_cpp_bin", return_value="/usr/bin/whisper-cli"), \
+             mock.patch.object(asr, "find_whisper_cpp_model", return_value="/m/ggml-base.bin"), \
+             mock.patch.object(asr, "local_available", return_value=False):
+            self.assertEqual(asr.available_backends(cfg), ["whisper_cpp"])
+
+    def test_forced_backend_respected(self):
+        from unittest import mock
+
+        from aicbili import asr
+
+        cfg = Config.load()
+        cfg.asr_backend = "local"
+        with mock.patch.object(asr, "local_available", return_value=False):
+            self.assertEqual(asr.available_backends(cfg), [])
+
+    def test_whisper_cpp_needs_both_bin_and_model(self):
+        from unittest import mock
+
+        from aicbili import asr
+
+        cfg = Config.load()
+        cfg.asr_backend = "whisper_cpp"
+        with mock.patch.object(asr, "whisper_cpp_bin", return_value="/usr/bin/whisper-cli"), \
+             mock.patch.object(asr, "find_whisper_cpp_model", return_value=None):
+            self.assertEqual(asr.available_backends(cfg), [], "有 CLI 没模型＝用不了")
+
+
+class TestGlobalConnLimit(unittest.TestCase):
+    """全局连接闸门：并发数必须真的被封顶。"""
+
+    def test_semaphore_caps_concurrency(self):
+        import threading
+        import time as _t
+
+        from aicbili import media
+
+        media.configure_global_limit(2)
+        live, peak, lock = [0], [0], threading.Lock()
+
+        def work():
+            with media._conn_slot():
+                with lock:
+                    live[0] += 1
+                    peak[0] = max(peak[0], live[0])
+                _t.sleep(0.05)
+                with lock:
+                    live[0] -= 1
+
+        ts = [threading.Thread(target=work) for _ in range(10)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertLessEqual(peak[0], 2, f"峰值并发 {peak[0]} 超过上限 2")
+
+    def test_kill_children_noop_when_idle(self):
+        from aicbili import media
+
+        media.kill_children()   # 不应该抛异常
+        self.assertEqual(media._LIVE_PROCS, set())
+
+
 class TestWhisperCpp(unittest.TestCase):
     """本地 whisper.cpp 后端：不依赖真模型也能验证接口与解析。"""
 

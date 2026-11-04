@@ -200,6 +200,23 @@ def cmd_analyze(cfg: Config, urls: List[str], a: argparse.Namespace) -> int:
 
     no_ai = bool(a.no_ai)
     dry = bool(a.dry_run)
+    # 批量时把「每视频并发」按 jobs 分摊，并给所有视频设一个全局连接上限，
+    # 否则 N 个视频 × 每视频 (抽帧线程 + 音频窗口) 会把 B站 CDN 打崩。
+    per_video = cfg.concurrency
+    if a.jobs > 1 and cfg.concurrency > 0:
+        per_video = max(2, cfg.concurrency // a.jobs)
+        cfg.concurrency = per_video
+        if not a.json:
+            log(f"  ⚙ 并发分摊：{a.jobs} 个视频 × 每视频 {per_video} 并发"
+                f"（全局上限 {max(per_video, a.jobs * per_video)} 条连接）")
+    media.configure_global_limit(max(2, per_video * min(a.jobs, 2)))
+
+    # 预检：一个转写后端都没有的话，没字幕的视频将只有画面
+    if not a.json and not dry:
+        from . import asr as _asr
+        if not _asr.available_backends(cfg) and not cfg.logged_in:
+            log("  ⚠ 未检测到任何转写后端：没有 AI 字幕的视频将只出画面、无文稿")
+
     analyzer = Analyzer(cfg, log=(lambda m: None) if a.json else log)
     results = []
     t0 = time.time()
@@ -215,19 +232,37 @@ def cmd_analyze(cfg: Config, urls: List[str], a: argparse.Namespace) -> int:
             r.error = str(e)
             return r
 
+    import concurrent.futures as cf
+
+    ex = cf.ThreadPoolExecutor(max_workers=max(1, a.jobs))
     try:
         if a.jobs <= 1:
             for u in urls:
+                if media.stop_requested():
+                    break
                 results.append(one(u))
         else:
-            import concurrent.futures as cf
-            with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-                results = list(ex.map(one, urls))
+            futs = [ex.submit(one, u) for u in urls]
+            for f in cf.as_completed(futs):
+                if media.stop_requested():
+                    break
+                try:
+                    results.append(f.result())
+                except Exception as e:
+                    from .pipeline import Result
+                    r = Result(); r.error = str(e); results.append(r)
     except KeyboardInterrupt:
         media.request_stop()
-        log("\n⏹ 已中断")
-        return 130
+        media.kill_children()
+        log("\n⏹ 已中断，正在停止（几秒内退出）...")
+        for f in locals().get("futs", []):
+            f.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+        time.sleep(min(3.0, 0.1))
+        sys.stdout.flush()
+        os._exit(130)          # 直接退出：避免 ThreadPool 在解释器关闭时刷 traceback
     finally:
+        ex.shutdown(wait=True, cancel_futures=True)
         analyzer.close()
 
     total = time.time() - t0
