@@ -244,7 +244,17 @@ class Analyzer:
               and (transcript or visual) and timeline):
             t0 = time.monotonic()
             try:
-                res.summary = summarize.summarize_material(timeline, self.cfg, log=self.log)
+                if self.cfg.style == "article" and transcript and transcript.chars:
+                    from . import article
+
+                    self.log(f"  📄 论文式改写（原文 {transcript.chars} 字）...")
+                    res.summary = article.build_article(
+                        video.title, transcript, visual, self.cfg, log=self.log)
+                    ratio = len(res.summary) / max(1, transcript.chars) * 100
+                    self.log(f"  📄 成文 {len(res.summary)} 字（原文的 {ratio:.0f}%）")
+                else:
+                    res.summary = summarize.summarize_material(timeline, self.cfg,
+                                                               log=self.log)
                 res.timings["summary"] = time.monotonic() - t0
             except Exception as e:
                 res.error = f"总结失败: {e}"

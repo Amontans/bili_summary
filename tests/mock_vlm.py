@@ -20,6 +20,8 @@ class MockState:
         self.fail_models: set = set()   # 这些模型名返回 404
         # 小于该 max_tokens 时返回 finish_reason=length（模拟输出被截断）
         self.truncate_below: int = 0
+        # 按 prompt 关键词路由回复：[(关键词, 回复), ...]，先匹配先生效
+        self.routes: List = []
         self.lock = threading.Lock()
 
     def reset(self) -> None:
@@ -28,6 +30,23 @@ class MockState:
             self.reply = "（mock 回复）"
             self.reply_image = self.reply_text = ""
             self.status = 200
+
+
+def _prompt_text(payload: Any) -> str:
+    """把请求里所有文本部分拼起来，供关键词路由用。"""
+    out = []
+    try:
+        for m in payload.get("messages") or []:
+            c = m.get("content")
+            if isinstance(c, str):
+                out.append(c)
+            elif isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        out.append(str(part.get("text") or ""))
+    except Exception:
+        pass
+    return "\n".join(out)
 
 
 def _has_media(payload: Any) -> bool:
@@ -65,6 +84,11 @@ def make_handler(state: MockState):
                                        "has_media": has_media})
                 status = state.status
                 reply = (state.reply_image if has_media else state.reply_text) or state.reply
+                prompt_txt = _prompt_text(payload)
+                for kw, r in state.routes:
+                    if kw in prompt_txt:
+                        reply = r
+                        break
                 if isinstance(payload, dict) and payload.get("model") in state.fail_models:
                     status, reply = 404, '{"error":{"message":"model not found"}}' 
             mt = int((payload or {}).get("max_tokens") or 0) if isinstance(payload, dict) else 0

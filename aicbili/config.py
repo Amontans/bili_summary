@@ -160,6 +160,11 @@ class Config:
     # ── 运行时 ──
     concurrency: int = 6
     mode: str = "auto"            # auto|native|frames|audio
+    # 输出体裁：
+    #   article = 论文式学习文章（等价重写，几乎不丢信息，可当教材通读）
+    #   summary = 摘要式笔记（压缩成要点，短但会丢信息）
+    style: str = "article"
+    verify: bool = False          # True=逐章自检遗漏并补写（多花约 1 倍调用，但更保真）
     quality: int = 80             # 期望清晰度 qn（1080P=80）
     output_dir: str = "./output"
     cache_dir: str = ""
@@ -221,6 +226,8 @@ class Config:
             audio_stall=_int(g("AUDIO_STALL"), 45),
             concurrency=_int(g("CONCURRENCY"), 6),
             mode=(g("MODE") or "auto").strip().lower(),
+            style=(g("STYLE") or "article").strip().lower(),
+            verify=_bool(g("VERIFY"), False),
             quality=_int(g("QUALITY"), 80),
             output_dir=g("OUTPUT_DIR") or "./output",
             cache_dir=g("CACHE_DIR") or "",
@@ -276,6 +283,7 @@ class Config:
             "ASR": self.asr_backend,
             "并发": self.concurrency,
             "模式": self.mode,
+            "体裁": "论文式文章" if self.style == "article" else "摘要式笔记",
             "期望清晰度": self.quality,
             "输出": self.output_dir,
             "缓存": str(self.cache_root()),

@@ -228,6 +228,102 @@ class TestTimeline(unittest.TestCase):
         self.assertIn("画面没覆盖的段落", text)
 
 
+class TestArticle(unittest.TestCase):
+    """论文式文章：分章、等价改写、降级不丢信息。"""
+
+    def _tr(self, n=5, seg=240):
+        from aicbili.asr import Segment, Transcript
+
+        return Transcript([Segment(i * seg, (i + 1) * seg,
+                                   f"第{i+1}段：设 x 等于 {i}，因此结果是 {i*2}。" * 6)
+                           for i in range(n)], source="mock")
+
+    def _cfg(self, srv):
+        cfg = Config.load()
+        cfg.retries = 1
+        cfg.concurrency = 2
+        for prov in (cfg.vlm, cfg.text):
+            prov.api_key = "k"
+            prov.base_url = srv.base_url
+            prov.model = "m"
+        return cfg
+
+    def _routes(self, n=5, seg=240):
+        import json as _j
+
+        return [
+            ("规划成", _j.dumps({"chapters": [
+                {"title": f"主题{i+1}", "start": i * seg, "end": (i + 1) * seg,
+                 "brief": f"讲主题{i+1}"} for i in range(n)]}, ensure_ascii=False)),
+            ("教科书级的书面正文", "书面正文：设 x 为变量，结果是 2x。"),
+            ("写一节 **引言**", "引言正文。"),
+            ("1. **摘要**", "## 摘要\n摘要正文。\n\n**关键词**：甲、乙"),
+            ("请写两部分", "## 结论\n结论正文。\n\n## 术语与概念\n- **x**：变量"),
+        ]
+
+    def test_ts_transcript_samples_but_keeps_timestamps(self):
+        from aicbili.article import _ts_transcript
+
+        tr = self._tr(60)
+        full = _ts_transcript(tr, max_chars=10 ** 9)
+        cut = _ts_transcript(tr, max_chars=2000)
+        self.assertLessEqual(len(cut), len(full))
+        self.assertIn("[", cut)                      # 仍有时间戳
+        self.assertTrue(cut.splitlines()[0].startswith("["))
+
+    def test_plan_normalizes_ranges(self):
+        import json as _j
+
+        from mock_vlm import MockServer
+
+        from aicbili import article
+
+        with MockServer() as srv:
+            cfg = self._cfg(srv)
+            # 故意给重叠 + 逆序 + 首章不从 0 开始
+            srv.state.routes = [("规划成", _j.dumps({"chapters": [
+                {"title": "A", "start": 100, "end": 400, "brief": "a"},
+                {"title": "B", "start": 200, "end": 900, "brief": "b"},
+                {"title": "C", "start": 300, "end": 500, "brief": "c"},
+            ]}, ensure_ascii=False))]
+            chs = article.plan_chapters(self._tr(5), None, cfg, log=lambda m: None)
+        self.assertEqual(chs[0].start, 0.0)
+        self.assertGreaterEqual(chs[-1].end, 1200 - 1)
+        for a, b in zip(chs, chs[1:]):
+            self.assertLessEqual(a.end, b.start, f"{a.title} 与 {b.title} 重叠")
+
+    def test_build_article_has_paper_sections(self):
+        from mock_vlm import MockServer
+
+        from aicbili import article
+
+        with MockServer() as srv:
+            cfg = self._cfg(srv)
+            srv.state.routes = self._routes()
+            art = article.build_article("测试", self._tr(), None, cfg, log=lambda m: None)
+        for sec in ("## 摘要", "## 引言", "## 一、主题1", "## 五、主题5",
+                    "## 结论", "## 术语与概念", "## 附：章节时间索引"):
+            self.assertIn(sec, art)
+
+    def test_chapter_failure_falls_back_to_raw_text(self):
+        """某章改写失败时，必须回退为原文，绝不能留空。"""
+        from mock_vlm import MockServer
+
+        from aicbili import article
+
+        with MockServer() as srv:
+            cfg = self._cfg(srv)
+            srv.state.routes = [
+                ("规划成", '{"chapters":[{"title":"A","start":0,"end":1200,"brief":"a"}]}'),
+                ("教科书级的书面正文", ""),        # 空产出 → 触发降级
+            ]
+            srv.state.reply_text = ""
+            chs = article.plan_chapters(self._tr(), None, cfg, log=lambda m: None)
+            article._write_all(chs, self._tr(), None, cfg, log=lambda m: None)
+        self.assertIn("原始转录", chs[0].body)
+        self.assertIn("设 x 等于", chs[0].body)
+
+
 class TestOutputLayout(unittest.TestCase):
     """md 只留笔记；txt 收走「值得回看」+ 原始材料；三份文件不重复。"""
 

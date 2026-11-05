@@ -44,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"aicbili {__version__}")
 
     g = p.add_argument_group("分析方式")
+    g.add_argument("--style", choices=["article", "summary"], default=None,
+                   help="article=论文式学习文章(默认，几乎不丢信息) summary=摘要式要点(短但丢信息)")
+    g.add_argument("--verify", action="store_true",
+                   help="逐章自检遗漏并补写（更保真，但调用次数约翻倍）")
     g.add_argument("--mode", choices=["auto", "frames", "native", "audio"], default=None,
                    help="auto=抽帧+转写(默认) frames=只抽帧 native=模型原生直读视频 audio=只转写")
     g.add_argument("--frames", type=int, default=None, dest="max_frames",
@@ -89,6 +93,10 @@ def cfg_from_args(a: argparse.Namespace) -> Config:
     overrides = {}
     if a.mode:
         overrides["mode"] = a.mode
+    if a.style:
+        overrides["style"] = a.style
+    if a.verify:
+        overrides["verify"] = True
     if a.max_frames:
         overrides["max_frames"] = a.max_frames
     if a.frame_width:
