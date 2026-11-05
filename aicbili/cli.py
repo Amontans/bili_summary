@@ -142,27 +142,59 @@ def cfg_from_args(a: argparse.Namespace) -> Config:
     return cfg
 
 
-def collect_inputs(inputs: List[str]) -> List[str]:
-    """展开 .txt 文件里的链接、去掉分享文案里的多余字符、去重。"""
-    import re
+_LINK_SUFFIXES = (".txt", ".list", ".md", ".csv")
+
+
+def collect_inputs(inputs: List[str]) -> "tuple[List[str], List[str]]":
+    """把命令行参数展开成链接列表。
+
+    返回 (链接列表, 问题列表)。问题会原样打印给用户 —— 这点很重要：
+    以前「文件不存在」或「文件是空的」会静默变成 0 个链接，然后掉进交互式粘贴模式，
+    用户完全不知道发生了什么（`aicbili links.txt` 变成等你敲键盘）。
+    """
+    import os as _os
 
     urls: List[str] = []
+    problems: List[str] = []
     for raw in inputs:
         p = Path(raw).expanduser()
-        if p.is_file() and p.suffix.lower() in (".txt", ".list", ".md"):
-            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if p.is_file():
+            if p.suffix.lower() not in _LINK_SUFFIXES:
+                problems.append(f"跳过 {raw}：不是支持的清单格式（{'/'.join(_LINK_SUFFIXES)}）")
+                continue
+            try:
+                lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError as e:
+                problems.append(f"读取失败 {raw}: {e}")
+                continue
+            found: List[str] = []
+            for line in lines:
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    urls.extend(_extract_links(line))
+                    found.extend(_extract_links(line))
+            if not found:
+                size = len("".join(lines).strip())
+                problems.append(f"文件里没有识别到任何链接：{raw}"
+                                + ("（文件是空的）" if size == 0 else ""))
+            urls.extend(found)
+        elif (p.suffix.lower() in _LINK_SUFFIXES or _os.sep in raw) and not raw.lower().startswith("http"):
+            problems.append(f"找不到文件：{raw}")
         else:
-            urls.extend(_extract_links(raw))
+            found = _extract_links(raw)
+            if not found:
+                problems.append(f"无法识别为链接/BV号：{raw[:48]}")
+            urls.extend(found)
+
     seen, out = set(), []
     for u in urls:
         k = u.strip()
         if k and k not in seen:
             seen.add(k)
             out.append(k)
-    return out
+    dup = len(urls) - len(out)
+    if dup > 0:
+        problems.append(f"已自动去重 {dup} 条重复链接")
+    return out, problems
 
 
 def _extract_links(text: str) -> List[str]:
@@ -184,8 +216,8 @@ def cmd_analyze(cfg: Config, urls: List[str], a: argparse.Namespace) -> int:
     from .pipeline import Analyzer
 
     if not urls:
-        # 和旧版一样：没给参数时支持交互式粘贴（一行一个，空行结束）
-        if sys.stdin.isatty():
+        # 和旧版一样：**完全没给参数**时才交互式粘贴（一行一个，空行结束）
+        if not a.inputs and sys.stdin.isatty():
             log("粘贴 B站链接 / BV 号（每行一个，空行结束）：")
             buf: List[str] = []
             while True:
@@ -196,7 +228,7 @@ def cmd_analyze(cfg: Config, urls: List[str], a: argparse.Namespace) -> int:
                 if not line:
                     break
                 buf.append(line)
-            urls = collect_inputs(buf)
+            urls, _ = collect_inputs(buf)
         if not urls:
             log("❗ 请提供视频链接 / BV 号，或用 -h 看用法")
             return 2
@@ -527,7 +559,16 @@ def _main(argv: Optional[List[str]] = None) -> int:
         return cmd_models()
     if cmd == "reformat":
         return cmd_reformat(cfg, a.inputs)
-    return cmd_analyze(cfg, collect_inputs(a.inputs), a)
+    urls, problems = collect_inputs(a.inputs)
+    if problems and not a.json:
+        for msg in problems:
+            log(f"  ⚠ {msg}")
+        if not urls:
+            log("")
+            log("❗ 没有可处理的链接，已退出（没有进入交互模式）")
+            return 2
+        log("")
+    return cmd_analyze(cfg, urls, a)
 
 
 if __name__ == "__main__":

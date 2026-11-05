@@ -228,6 +228,75 @@ class TestTimeline(unittest.TestCase):
         self.assertIn("画面没覆盖的段落", text)
 
 
+class TestCollectInputs(unittest.TestCase):
+    """文件读取：找不到 / 空文件 / 正常 / 去重 都要有明确反馈。"""
+
+    def test_reads_links_from_file(self):
+        import tempfile
+
+        from aicbili.cli import collect_inputs
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "links.txt"
+            f.write_text("BV1GJ411x7h7\n# 注释\n"
+                         "https://www.bilibili.com/video/BV1XaaP6UEw2?x=1\n\n", encoding="utf-8")
+            urls, problems = collect_inputs([str(f)])
+        self.assertEqual(len(urls), 2)
+        self.assertIn("BV1GJ411x7h7", urls[0])
+        self.assertEqual(problems, [])
+
+    def test_watchlater_url_keeps_bv(self):
+        import tempfile
+
+        from aicbili.cli import collect_inputs
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "w.txt"
+            f.write_text("https://www.bilibili.com/list/watchlater/?bvid=BV1rrhW6nE9v&oid=1\n",
+                         encoding="utf-8")
+            urls, _ = collect_inputs([str(f)])
+        self.assertIn("BV1rrhW6nE9v", urls[0])
+
+    def test_empty_file_is_reported_not_silent(self):
+        """回归：空文件曾静默变成 0 条链接，然后掉进交互式粘贴模式。"""
+        import tempfile
+
+        from aicbili.cli import collect_inputs
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "empty.txt"
+            f.write_text("\n", encoding="utf-8")
+            urls, problems = collect_inputs([str(f)])
+        self.assertEqual(urls, [])
+        self.assertTrue(any("空" in p or "没有识别" in p for p in problems), problems)
+
+    def test_missing_file_is_reported(self):
+        from aicbili.cli import collect_inputs
+
+        urls, problems = collect_inputs(["绝对不存在的清单.txt"])
+        self.assertEqual(urls, [])
+        self.assertTrue(any("找不到文件" in p for p in problems), problems)
+
+    def test_dedupes_and_reports(self):
+        import tempfile
+
+        from aicbili.cli import collect_inputs
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "dup.txt"
+            f.write_text("BV1GJ411x7h7\nBV1GJ411x7h7\n", encoding="utf-8")
+            urls, problems = collect_inputs([str(f)])
+        self.assertEqual(len(urls), 1)
+        self.assertTrue(any("去重" in p for p in problems))
+
+    def test_unrecognized_arg_reported(self):
+        from aicbili.cli import collect_inputs
+
+        urls, problems = collect_inputs(["这只是一段话"])
+        self.assertEqual(urls, [])
+        self.assertTrue(any("无法识别" in p for p in problems))
+
+
 class TestArticle(unittest.TestCase):
     """论文式文章：分章、等价改写、降级不丢信息。"""
 

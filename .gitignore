@@ -14,3 +14,7 @@ output_*/
 dist/
 build/
 储存/
+# 用户自己的链接清单（不要提交）
+links.txt
+urls.txt
+*.links
