@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aicbili"
-version = "3.0.3"
+version = "3.0.4"
 description = "让 AI 真正「看」B站视频：远程抽帧 + 音频转写 + 多模态总结，全程不下载完整视频"
 readme = "README.md"
 requires-python = ">=3.9"
