@@ -228,6 +228,103 @@ class TestTimeline(unittest.TestCase):
         self.assertIn("画面没覆盖的段落", text)
 
 
+class TestOutputLayout(unittest.TestCase):
+    """md 只留笔记；txt 收走「值得回看」+ 原始材料；三份文件不重复。"""
+
+    def test_split_review(self):
+        from aicbili.pipeline import _split_review
+
+        sm = ("## 一句话总结\n讲了 print。\n\n## 内容大纲\n- [0:00] 开场\n\n"
+              "## 值得回看的片段\n- [12:33] sep 与 end")
+        body, review = _split_review(sm)
+        self.assertIn("讲了 print", body)
+        self.assertIn("内容大纲", body)
+        self.assertNotIn("值得回看", body)
+        self.assertIn("值得回看", review)
+        self.assertIn("12:33", review)
+
+    def test_split_review_absent(self):
+        from aicbili.pipeline import _split_review
+
+        body, review = _split_review("## 一句话总结\n就这些")
+        self.assertIn("就这些", body)
+        self.assertEqual(review, "")
+
+    def test_strip_heading(self):
+        from aicbili.pipeline import _strip_heading
+
+        self.assertEqual(_strip_heading("## 值得回看的片段\n- [1:00] 好"), "- [1:00] 好")
+        self.assertEqual(_strip_heading("- 无标题"), "- 无标题")
+
+    def test_reformat_legacy_md(self):
+        import tempfile
+
+        from aicbili.pipeline import reformat_report
+
+        legacy = """# 测试视频
+
+- **链接**：https://bilibili.com/video/BVtest
+
+## 一句话总结
+讲了个东西。
+
+## 内容大纲
+- [0:00] 开场
+
+## 值得回看的片段
+- [1:00] 好东西
+
+## 附：画面记录（逐帧）
+
+- [0:00] (slides) 封面
+
+---
+
+## 附：多模态时间轴
+
+```
+[0:00] 【画面】封面
+```
+
+## 附：完整文稿
+
+大家好，今天讲个东西。
+"""
+        with tempfile.TemporaryDirectory() as d:
+            md = Path(d) / "a.md"
+            md.write_text(legacy, encoding="utf-8")
+            did, _ = reformat_report(md)
+            self.assertTrue(did)
+            new_md = md.read_text(encoding="utf-8")
+            new_txt = md.with_suffix(".txt").read_text(encoding="utf-8")
+        # md 只留笔记
+        self.assertIn("一句话总结", new_md)
+        self.assertNotIn("值得回看", new_md)
+        self.assertNotIn("附：", new_md)
+        self.assertNotIn("今天讲个东西", new_md)
+        # txt 收走其余全部
+        self.assertIn("值得回看", new_txt)
+        self.assertIn("【画面记录（逐帧）】", new_txt)
+        self.assertIn("封面", new_txt)
+        self.assertIn("【多模态时间轴", new_txt)
+        self.assertIn("【完整文稿】", new_txt)
+        self.assertIn("今天讲个东西", new_txt)
+        # 不能残留 markdown 围栏
+        self.assertNotIn("```", new_txt)
+
+    def test_reformat_is_idempotent(self):
+        import tempfile
+
+        from aicbili.pipeline import reformat_report
+
+        with tempfile.TemporaryDirectory() as d:
+            md = Path(d) / "b.md"
+            md.write_text("# t\n\n## 一句话总结\n新的\n", encoding="utf-8")
+            did, msg = reformat_report(md)
+        self.assertFalse(did)
+        self.assertIn("已是新格式", msg)
+
+
 class TestVisionParsing(unittest.TestCase):
     def test_extract_plain_json(self):
         self.assertEqual(_extract_json('{"a":1}'), {"a": 1})

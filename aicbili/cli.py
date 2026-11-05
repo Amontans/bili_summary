@@ -437,6 +437,40 @@ def cmd_cache(cfg: Config) -> int:
     return 0
 
 
+def cmd_reformat(cfg: Config, inputs: List[str]) -> int:
+    """把旧格式报告（全塞在 md 里）重排成 md + txt，不调用任何 AI。"""
+    from .pipeline import reformat_report
+
+    target = Path(inputs[0]).expanduser() if inputs else Path(cfg.output_dir).expanduser()
+    if target.is_file():
+        files = [target]
+    elif target.is_dir():
+        files = sorted(target.glob("*.md"))
+    else:
+        log(f"❗ 找不到路径: {target}")
+        return 2
+    if not files:
+        log(f"❗ {target} 里没有 .md 文件")
+        return 2
+
+    changed = skipped = failed = 0
+    for f in files:
+        try:
+            did, msg = reformat_report(f)
+        except Exception as e:
+            failed += 1
+            log(f"  ❌ {f.name[:40]}: {e}")
+            continue
+        if did:
+            changed += 1
+            log(f"  ✅ {f.name[:44]}  {msg}")
+        else:
+            skipped += 1
+    log("")
+    log(f"完成：重排 {changed} 份，已是新格式 {skipped} 份，失败 {failed} 份")
+    return 0 if failed == 0 else 1
+
+
 def cmd_models() -> int:
     log("内置服务商预设（--provider）：\n")
     for name, p in PROVIDER_PRESETS.items():
@@ -465,7 +499,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
     # 允许 `aicbili doctor` 这类子命令出现在任意位置
     cmd = "analyze"
     for i, tok in enumerate(argv):
-        if tok in ("doctor", "config", "cache", "models") and not tok.startswith("-"):
+        if tok in ("doctor", "config", "cache", "models", "reformat") and not tok.startswith("-"):
             cmd = tok
             argv.pop(i)
             break
@@ -483,6 +517,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
         return cmd_cache(cfg)
     if cmd == "models":
         return cmd_models()
+    if cmd == "reformat":
+        return cmd_reformat(cfg, a.inputs)
     return cmd_analyze(cfg, collect_inputs(a.inputs), a)
 
 

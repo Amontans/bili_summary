@@ -56,6 +56,31 @@ def _safe_name(title: str, key: str) -> str:
     return (name[:MAX_FILENAME] or key) + f" [{key}]"
 
 
+_REVIEW_HEADINGS = ("## 值得回看的片段", "# 值得回看的片段", "值得回看的片段")
+
+
+def _strip_heading(text: str) -> str:
+    """去掉正文开头那一行标题（模型会写成 '## 值得回看的片段'）。
+
+    只剥离开头的 # 标题行，正文里的 markdown 列表/加粗原样保留。
+    """
+    lines = text.strip().splitlines()
+    while lines and lines[0].strip().startswith("#"):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def _split_review(summary: str) -> Tuple[str, str]:
+    """把总结切成「笔记本体」与「值得回看的片段」两部分。"""
+    if not summary:
+        return "", ""
+    for h in _REVIEW_HEADINGS:
+        i = summary.find(h)
+        if i != -1:
+            return summary[:i].rstrip(), summary[i:].strip()
+    return summary.strip(), ""
+
+
 def _load_json(path: Path) -> Dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -198,14 +223,11 @@ class Analyzer:
         transcript = res.transcript
         visual = res.visual
         files: Dict[str, str] = {}
-        if transcript and transcript.chars > 0:
-            txt_path = outdir / f"{stem}.txt"
-            txt_path.write_text(transcript.text, encoding="utf-8")
-            files["transcript"] = str(txt_path)
-            if transcript.segments and transcript.segments[-1].end > 0:
-                srt_path = outdir / f"{stem}.srt"
-                asr.write_srt(transcript.segments, str(srt_path))
-                files["srt"] = str(srt_path)
+        if transcript and transcript.chars > 0 and transcript.segments \
+                and transcript.segments[-1].end > 0:
+            srt_path = outdir / f"{stem}.srt"
+            asr.write_srt(transcript.segments, str(srt_path))
+            files["srt"] = str(srt_path)
 
         timeline = ""
         if transcript or visual:
@@ -240,9 +262,17 @@ class Analyzer:
         res.timings["total"] = time.monotonic() - t_start
         res.files = files
         res.mode = mode
-        md = self._render_markdown(video, res, timeline)
+        # 拆分总结：md 只留「笔记本体」，「值得回看的片段」挪到 txt，
+        # 这样 md / txt / srt 三者内容不重复。
+        note_body, review = _split_review(res.summary)
+        md = self._render_markdown(video, res, note_body)
         md_path.write_text(md, encoding="utf-8")
         files["report"] = str(md_path)
+
+        txt = self._render_text(video, res, review, timeline)
+        txt_path = outdir / f"{stem}.txt"
+        txt_path.write_text(txt, encoding="utf-8")
+        files["transcript"] = str(txt_path)
 
         # dry-run 不算完成，否则下次会被误判为「已完成」而跳过
         status = "dry-run" if dry_run else ("done" if res.ok else "partial")
@@ -561,7 +591,33 @@ class Analyzer:
         return note
 
     # ------------------------------------------------------------------
-    def _render_markdown(self, video: Video, res: Result, timeline: str) -> str:
+    def _render_text(self, video: Video, res: Result, review: str, timeline: str) -> str:
+        """纯文本产物：值得回看的片段 + 全部原始材料（md 里不再重复这些）。"""
+        bar = "━" * 56
+        head = [
+            video.title,
+            f"{video.page_url}",
+            f"UP 主：{video.owner or '未知'} ｜ 时长：{video.duration // 60} 分 "
+            f"{video.duration % 60} 秒",
+            f"文稿：{res.transcript.source if res.transcript else '无'}"
+            f"（{res.transcript.chars if res.transcript else 0} 字） ｜ "
+            f"画面：{res.visual.source + f' · {len(res.visual.items)} 条' if res.visual else '未启用'}",
+            "",
+        ]
+        parts: List[str] = [chr(10).join(head)]
+
+        if review:
+            parts += [bar, "【值得回看的片段】", bar, _strip_heading(review), ""]
+        if res.visual and res.visual.items:
+            parts += [bar, "【画面记录（逐帧）】", bar, res.visual.as_markdown(), ""]
+        if timeline:
+            parts += [bar, "【多模态时间轴（画面 + 语音对齐）】", bar, timeline, ""]
+        if res.transcript and res.transcript.chars:
+            parts += [bar, "【完整文稿】", bar, res.transcript.text, ""]
+        return chr(10).join(parts) + chr(10)
+
+    # ------------------------------------------------------------------
+    def _render_markdown(self, video: Video, res: Result, note_body: str) -> str:
         t = res.timings
         head = [
             f"# {video.title}" + (f" · {video.part}" if video.page > 1 and video.part else ""),
@@ -581,14 +637,9 @@ class Analyzer:
         ]
         if res.error:
             head += [f"> ⚠ {res.error}", ""]
-        body = res.summary or "（未生成总结）"
+        body = note_body or "（未生成总结）"
         parts = ["\n".join(head), body]
-        if res.visual and res.visual.items:
-            parts += ["", "## 附：画面记录（逐帧）", "", res.visual.as_markdown()]
-        if timeline:
-            parts += ["", "---", "", "## 附：多模态时间轴", "", "```", timeline[:20000], "```"]
-        if res.transcript and res.transcript.segments:
-            parts += ["", "## 附：完整文稿", "", res.transcript.text]
+        # 画面记录 / 时间轴 / 完整文稿 / 值得回看 都在同名 .txt 里，md 保持精简
         return "\n".join(parts) + "\n"
 
     # ------------------------------------------------------------------
@@ -606,3 +657,83 @@ class Analyzer:
 
 
 __all__ = ["Analyzer", "Result"]
+
+
+# --------------------------------------------------------------------------
+# 旧格式迁移：把「全塞在 md 里」的旧报告拆成新的 md（笔记）+ txt（原始材料）
+# --------------------------------------------------------------------------
+_MARK_FRAMES = "## 附：画面记录（逐帧）"
+_MARK_TIMELINE = "## 附：多模态时间轴"
+_MARK_TRANS = "## 附：完整文稿"
+
+
+def reformat_report(md_path: Path) -> Tuple[bool, str]:
+    """把一份旧格式 .md 重排成新格式（不调用任何 AI）。
+
+    返回 (是否改动, 说明)。
+    旧格式：md 里同时有笔记 + 画面记录 + 时间轴 + 完整文稿（+ 值得回看）
+    新格式：md 只留笔记；txt 收走 值得回看 + 三个附录
+    """
+    text = md_path.read_text(encoding="utf-8")
+    if _MARK_FRAMES not in text:          # 已经是新格式（或没有附录）
+        return False, "已是新格式"
+
+    # 1) 拆出头部（标题 + 元信息）
+    lines = text.splitlines()
+    head_end = next((i for i, l in enumerate(lines) if l.startswith("## ")), len(lines))
+    header = "\n".join(lines[:head_end]).rstrip()
+
+    body = "\n".join(lines[head_end:])
+
+    # 2) 拆出三个附录
+    def cut(src: str, start_mark: str, end_mark: Optional[str]) -> Tuple[str, str]:
+        a = src.find(start_mark)
+        if a == -1:
+            return src, ""
+        b = src.find(end_mark, a + len(start_mark)) if end_mark else -1
+        if b == -1:
+            return src[:a], src[a:]
+        return src[:a] + src[b:], src[a:b]
+
+    body, raw_trans = cut(body, _MARK_TRANS, None)
+    body, raw_time = cut(body, _MARK_TIMELINE, _MARK_TRANS)
+    body, raw_frames = cut(body, _MARK_FRAMES, _MARK_TIMELINE)
+
+    # 3) 笔记里拆出「值得回看的片段」
+    note, review = _split_review(body.strip())
+    note = note.replace("\n---\n", "\n").strip()
+
+    # 4) 收拾附录文本
+    def clean(chunk: str, mark: str) -> str:
+        if not chunk:
+            return ""
+        chunk = chunk.replace(mark, "").strip()
+        # 时间轴原本包在 ``` 里
+        if chunk.startswith("```"):
+            chunk = chunk.split("\n", 1)[-1]
+        if chunk.endswith("```"):
+            chunk = chunk.rsplit("```", 1)[0]
+        return chunk.strip().strip("-").strip()
+
+    frames_txt = clean(raw_frames, _MARK_FRAMES)
+    time_txt = clean(raw_time, _MARK_TIMELINE)
+    trans_txt = clean(raw_trans, _MARK_TRANS)
+
+    # 5) 写回 md（只留笔记）
+    md_path.write_text(f"{header}\n\n{note}\n", encoding="utf-8")
+
+    # 6) 写同名 .txt
+    bar = "━" * 56
+    parts = [header, ""]
+    if review:
+        parts += [bar, "【值得回看的片段】", bar, _strip_heading(review), ""]
+    if frames_txt:
+        parts += [bar, "【画面记录（逐帧）】", bar, frames_txt, ""]
+    if time_txt:
+        parts += [bar, "【多模态时间轴（画面 + 语音对齐）】", bar, time_txt, ""]
+    if trans_txt:
+        parts += [bar, "【完整文稿】", bar, trans_txt, ""]
+    txt_path = md_path.with_suffix(".txt")
+    txt_path.write_text("\n".join(parts) + "\n", encoding="utf-8")
+    return True, f"md {len(text.encode())//1024}KB → {md_path.stat().st_size//1024}KB, " \
+                 f"txt {txt_path.stat().st_size//1024}KB"
