@@ -211,6 +211,13 @@ def cmd_analyze(cfg: Config, urls: List[str], a: argparse.Namespace) -> int:
                 f"（全局上限 {max(per_video, a.jobs * per_video)} 条连接）")
     media.configure_global_limit(max(2, per_video * min(a.jobs, 2)))
 
+    # 本地转写也吃 CPU：批量时按 jobs 分摊线程，避免 N 个 whisper 抢 8 个核
+    cores = os.cpu_count() or 4
+    if a.jobs > 1 and not cfg.whisper_threads:
+        cfg.whisper_threads = max(2, (cores - 1) // a.jobs)
+        if not a.json:
+            log(f"  ⚙ 本地转写线程：每视频 {cfg.whisper_threads}（共 {cores} 核 / {a.jobs} 路）")
+
     # 预检：一个转写后端都没有的话，没字幕的视频将只有画面
     if not a.json and not dry:
         from . import asr as _asr

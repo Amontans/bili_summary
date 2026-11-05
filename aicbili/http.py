@@ -19,6 +19,52 @@ import urllib.request
 import uuid
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+_IPV4_PATCHED = False
+
+
+def prefer_ipv4() -> None:
+    """让 urllib 优先用 IPv4。
+
+    B站（以及部分 CDN）的域名会先返回 AAAA 记录，而很多家用网络/IPv6 隧道
+    实际不通。curl 有 Happy Eyeballs（v4/v6 并行尝试），标准库没有 ——
+    它会先试 IPv6，一直卡到超时（实测 96 秒）才回退 IPv4。
+
+    这里把 getaddrinfo 的结果按「IPv4 优先」重排，保留 IPv6 作为兜底。
+    设置 AICBILI_IPV4_ONLY=1 可以彻底只用 IPv4。
+    """
+    global _IPV4_PATCHED
+    if _IPV4_PATCHED:
+        return
+    _IPV4_PATCHED = True
+    orig = socket.getaddrinfo
+    only4 = os.environ.get("AICBILI_IPV4_ONLY", "").strip() in ("1", "true", "yes")
+
+    # 进程内 DNS 缓存：B站域名首次解析可能因 v6 记录卡 20~30 秒，
+    # 缓存后同一域名的后续请求（含多线程并发）都是 0 开销。
+    import threading as _th
+    _cache: dict = {}
+    _lk = _th.Lock()
+    _TTL = 600.0
+
+    def _gai(host, port, family=0, type=0, proto=0, flags=0):
+        key = (host, port, family, type, proto, flags)
+        now = time.monotonic()
+        with _lk:
+            hit = _cache.get(key)
+            if hit and now - hit[0] < _TTL:
+                return hit[1]
+        infos = orig(host, port, family, type, proto, flags)
+        if family in (0, socket.AF_UNSPEC):
+            v4 = [i for i in infos if i[0] == socket.AF_INET]
+            v6 = [i for i in infos if i[0] != socket.AF_INET]
+            infos = (v4 if (only4 and v4) else v4 + v6)   # IPv4 优先，IPv6 兜底
+        with _lk:
+            _cache[key] = (now, infos)
+        return infos
+
+    socket.getaddrinfo = _gai
+
+
 DEFAULT_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -57,6 +103,7 @@ def _build_opener() -> urllib.request.OpenerDirector:
 def request(method: str, url: str, *, headers: Optional[Mapping[str, str]] = None,
             params: Optional[Mapping[str, Any]] = None, data: Optional[bytes] = None,
             timeout: float = 30.0, retries: int = 3, follow: bool = True) -> Response:
+    prefer_ipv4()
     if params:
         qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         url = url + ("&" if "?" in url else "?") + qs

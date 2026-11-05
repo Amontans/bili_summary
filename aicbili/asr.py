@@ -115,7 +115,7 @@ def transcribe_local(audio_path: str, cfg: Config, log=print) -> Transcript:
     if not device:
         device, compute = _auto_device()
     log(f"🎧 本地转写：模型={cfg.whisper_model} 设备={device} 精度={compute}")
-    t0 = time.time()
+    t0 = time.monotonic()
     model = WhisperModel(cfg.whisper_model, device=device, compute_type=compute)
     segments, info = model.transcribe(
         audio_path,
@@ -132,7 +132,7 @@ def transcribe_local(audio_path: str, cfg: Config, log=print) -> Transcript:
             segs.append(Segment(start=float(s.start), end=float(s.end), text=txt))
     return Transcript(segments=segs, source="local-whisper",
                       language=getattr(info, "language", "") or "",
-                      elapsed=time.time() - t0)
+                      elapsed=time.monotonic() - t0)
 
 
 def _auto_device():
@@ -158,7 +158,7 @@ def transcribe_openai(audio_path: str, cfg: Config, log=print) -> Transcript:
     model = os.environ.get("AICBILI_ASR_MODEL") or "whisper-1"
     url = p.base_url.rstrip("/") + "/audio/transcriptions"
     log(f"☁️ 云端转写：{model} @ {p.base_url}")
-    t0 = time.time()
+    t0 = time.monotonic()
     with open(audio_path, "rb") as f:
         blob = f.read()
     payload = _http.post_multipart(
@@ -176,10 +176,10 @@ def transcribe_openai(audio_path: str, cfg: Config, log=print) -> Transcript:
                                 end=float(s.get("end") or 0), text=txt))
     if not segs and payload.get("text"):
         return Transcript(segments=[Segment(0, 0, str(payload["text"]).strip())],
-                          source="openai-asr", elapsed=time.time() - t0)
+                          source="openai-asr", elapsed=time.monotonic() - t0)
     return Transcript(segments=segs, source="openai-asr",
                       language=str(payload.get("language") or ""),
-                      elapsed=time.time() - t0)
+                      elapsed=time.monotonic() - t0)
 
 
 # --------------------------------------------------------------------------
@@ -282,14 +282,16 @@ def transcribe_whisper_cpp(audio_path: str, cfg: Config, log=print) -> Transcrip
             "    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin\n"
             "或用 AICBILI_WHISPER_CPP_MODEL 指定已有 .bin 路径"
         )
-    t0 = time.time()
-    log(f"🎙 whisper.cpp 本地转写：{os.path.basename(model)}（{os.path.basename(binary)}）")
+    t0 = time.monotonic()
+    log(f"🎙 whisper.cpp 本地转写：{os.path.basename(model)}"
+        f"（{os.path.basename(binary)}，{cfg.whisper_threads or 'auto'} 线程）")
     with tempfile.TemporaryDirectory(prefix="aicbili_wcpp_") as td:
         wav = os.path.join(td, "audio.wav")
         _to_wav16k(audio_path, wav)
         prefix = os.path.join(td, "out")
+        threads = cfg.whisper_threads or max(2, (os.cpu_count() or 4) - 1)
         cmd = [binary, "-m", model, "-f", wav, "-oj", "-of", prefix,
-               "-t", str(max(2, (os.cpu_count() or 4) - 1))]
+               "-t", str(max(1, threads))]
         lang = (cfg.whisper_language or "").strip()
         if lang:
             cmd += ["-l", lang]
@@ -312,7 +314,7 @@ def transcribe_whisper_cpp(audio_path: str, cfg: Config, log=print) -> Transcrip
     if not segs:
         raise RuntimeError("whisper.cpp 转写结果为空")
     return Transcript(segments=segs, source="whisper.cpp", language=lang_got,
-                      elapsed=time.time() - t0)
+                      elapsed=time.monotonic() - t0)
 
 
 def available_backends(cfg: Config) -> List[str]:

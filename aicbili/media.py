@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -41,6 +42,45 @@ def _conn_slot():
 
 class FFmpegError(RuntimeError):
     pass
+
+
+_URL_RE = re.compile(r"https?://\S+")
+_SECRET_Q = re.compile(r"[?&](upsig|upsig|qn_dyeid|traceid|oi|mid|deadline|dl|sign)=[^&\s]*",
+                       re.I)
+
+
+def scrub(msg: str, limit: int = 240) -> str:
+    """把日志里的长 URL 脱敏。
+
+    ffmpeg 报错会带上完整签名地址（含 upsig / mid / qn_dyeid / traceid），
+    既刷屏又能定位到用户账号 —— 只保留主机名，其余参数一律丢掉。
+    """
+    if not msg:
+        return ""
+
+    def _short(m):
+        u = m.group(0)
+        try:
+            parts = urllib.parse.urlsplit(u)
+            host = parts.netloc
+        except ValueError:
+            host = "?"
+        q = "?…" if parts.query else ""
+        return f"https://{host}/…{q}"
+
+    out = _URL_RE.sub(_short, msg)
+    out = _SECRET_Q.sub(r"?\1=…", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out if len(out) <= limit else out[:limit] + "…"
+
+
+def looks_like_expired(err: "Exception | str") -> bool:
+    """判断是否是「签名过期 / 被拒」，这类错误重新取流地址才有救。"""
+    t = str(err).lower()
+    return any(k in t for k in ("403", "forbidden", "expired", "access denied",
+                                "name resolution", "resolve hostname", "could not resolve",
+                                "server returned 40", "no address associated",
+                                "network is unreachable", "connection reset"))
 
 
 # 正在跑的 ffmpeg 子进程 PID，中断时要一并杀掉，否则会留下孤儿进程
@@ -132,7 +172,7 @@ def _run(cmd: Sequence[str], timeout: float = 180.0, tag: str = "ffmpeg",
     )
     with _LIVE_LOCK:
         _LIVE_PROCS.add(proc.pid)
-    t0 = time.time()
+    t0 = time.monotonic()
     last_size = -1
     last_progress = t0
     try:
@@ -142,11 +182,11 @@ def _run(cmd: Sequence[str], timeout: float = 180.0, tag: str = "ffmpeg",
         if stop_requested():
             proc.kill()
             raise FFmpegError("已请求停止")
-        now = time.time()
+        now = time.monotonic()
         if now - t0 > timeout:
             proc.kill()
             _, err = proc.communicate()
-            raise FFmpegError(f"{tag} 超时({timeout:.0f}s): {err[-400:]}")
+            raise FFmpegError(scrub(f"{tag} 超时({timeout:.0f}s): {err[-400:]}"))
         if watch_path and stall_secs > 0:
             try:
                 size = os.path.getsize(watch_path)
@@ -166,8 +206,8 @@ def _run(cmd: Sequence[str], timeout: float = 180.0, tag: str = "ffmpeg",
             proc.kill()
     _, err = proc.communicate()
     if proc.returncode != 0:
-        tail = (err or "").strip().splitlines()[-6:]
-        raise FFmpegError(f"{tag} 失败(rc={proc.returncode}): " + " | ".join(tail))
+        tail = (err or "").strip().splitlines()[-4:]
+        raise FFmpegError(scrub(f"{tag} 失败(rc={proc.returncode}): " + " | ".join(tail)))
 
 
 @dataclass
@@ -289,13 +329,13 @@ def rank_urls(stream: Stream, *, sample: int = 262144, timeout: float = 20.0,
                 if ": " in line:
                     k, v = line.split(": ", 1)
                     headers[k] = v
-        t0 = time.time()
+        t0 = time.monotonic()
         try:
             body = _http.get_bytes(u, headers=headers, timeout=timeout, retries=1,
                                    byte_range=(0, max(1024, sample) - 1))
         except Exception:
             return u, 0.0
-        dt = max(1e-3, time.time() - t0)
+        dt = max(1e-3, time.monotonic() - t0)
         return u, len(body) / dt / 1024.0
 
     with cf.ThreadPoolExecutor(max_workers=len(urls)) as ex:
@@ -365,7 +405,7 @@ def extract_audio_parallel(stream: Stream, out_path: str, duration: float, *,
                     pass
         return None
 
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
         with cf.ThreadPoolExecutor(max_workers=windows) as ex:
             parts = [p for p in ex.map(one, range(windows)) if p]
@@ -382,7 +422,7 @@ def extract_audio_parallel(stream: Stream, out_path: str, duration: float, *,
             os.replace(out_path + ".part", out_path)
         size = os.path.getsize(out_path)
         log(f"  🎧 音频 {size / 1024:.0f} KB：{len(parts)}/{windows} 个窗口并发，"
-            f"用时 {time.time() - t0:.1f}s（{duration / max(1e-6, time.time() - t0):.0f}x 实时）")
+            f"用时 {time.monotonic() - t0:.1f}s（{duration / max(1e-6, time.monotonic() - t0):.0f}x 实时）")
         return MediaResult(out_path, duration, size)
     finally:
         import shutil as _sh
@@ -392,6 +432,7 @@ def extract_audio_parallel(stream: Stream, out_path: str, duration: float, *,
 
 __all__ = [
     "FFmpegError", "MediaResult", "STOP", "configure_global_limit", "download_bytes",
+    "looks_like_expired", "scrub",
     "extract_audio", "kill_children",
     "extract_audio_parallel", "ffmpeg_path", "grab_frame", "has_ffmpeg",
     "http_header_arg", "probe_anonymous", "rank_urls", "referer_free_url",

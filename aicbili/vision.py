@@ -230,9 +230,11 @@ class VisionModel:
             }
             truncations = 0        # 截断重试有独立预算，不吃普通重试次数
             for attempt in range(3):
+                budget = int(payload["max_tokens"])
+                timeout = max(self.prov.timeout, 90.0 + budget / 25.0)
                 try:
                     data = _http.post_json(url, payload, headers=hdr,
-                                           timeout=self.prov.timeout, retries=1)
+                                           timeout=timeout, retries=1)
                     return _message_text(data).strip()
                 except TruncatedOutput as e:
                     last = e
@@ -266,7 +268,7 @@ class VisionModel:
     # ------------------------------------------------ 看拼图
     def describe_sheet(self, sheet_jpeg: bytes, timestamps: Sequence[float],
                        title: str = "", *, extra_hint: str = "") -> VisualNote:
-        t0 = time.time()
+        t0 = time.monotonic()
         b64 = base64.b64encode(sheet_jpeg).decode()
         prompt = SHEET_PROMPT.format(n=len(timestamps), title=title or "(未提供)")
         if extra_hint:
@@ -281,7 +283,7 @@ class VisionModel:
         raw = self._chat(content, max_tokens=1800)
         note = self._parse_sheet(raw, timestamps)
         note.source = "sheet"
-        note.elapsed = time.time() - t0
+        note.elapsed = time.monotonic() - t0
         return note
 
     def _parse_sheet(self, raw: str, timestamps: Sequence[float]) -> VisualNote:

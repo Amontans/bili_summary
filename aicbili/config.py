@@ -151,7 +151,8 @@ class Config:
     whisper_compute: str = ""
     whisper_cpp_model: str = ""   # ggml-*.bin 路径（留空自动找）
     whisper_cpp_bin: str = ""     # whisper-cli 路径（留空自动找）
-    whisper_language: str = "zh"  # whisper.cpp 强制语言，速度更快更准
+    whisper_language: str = "auto"  # auto=自动识别（B站有大量英文/日文原声）；填 zh 可强制中文
+    whisper_threads: int = 0      # 0=自动（核数-1）；批量时会按 jobs 分摊
     audio_bitrate: str = "48k"
     audio_windows: int = 4        # 分窗并发抽取音频，突破单连接限速
     audio_stall: int = 45         # 单个窗口多少秒没数据增长就换节点
@@ -213,7 +214,8 @@ class Config:
             whisper_compute=g("WHISPER_COMPUTE") or "",
             whisper_cpp_model=g("WHISPER_CPP_MODEL") or "",
             whisper_cpp_bin=g("WHISPER_CPP_BIN") or "",
-            whisper_language=g("WHISPER_LANGUAGE") or "zh",
+            whisper_language=g("WHISPER_LANGUAGE") or "auto",
+            whisper_threads=_int(g("WHISPER_THREADS"), 0),
             audio_bitrate=g("AUDIO_BITRATE") or "48k",
             audio_windows=_int(g("AUDIO_WINDOWS"), 4),
             audio_stall=_int(g("AUDIO_STALL"), 45),

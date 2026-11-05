@@ -21,25 +21,28 @@ SYS_PROMPT = (
 
 FINAL_PROMPT = """下面是同一个视频的「画面记录」与「语音文稿」按时间对齐后的材料。
 
-请输出一份可直接阅读的学习笔记，严格按以下结构：
+请输出一份可直接阅读的学习笔记，严格按以下结构，**并严格控制在给定的条数与总字数内**
+（材料可能很长，但笔记是给人快速抓重点的，不要穷举所有时间点）：
 
 ## 一句话总结
-（不超过 60 字，说清这个视频讲了什么、对谁有用）
+（不超过 60 字：讲什么 + 对谁有用）
 
 ## 内容大纲
-（按时间分章，每章以 `[起止时间] 章节标题` 开头，下面 1~3 条要点；同时点明这一段画面在做什么）
+（**最多 8 章**，每章 `[起止时间] 章节标题`，下面 1~3 条要点；点明这段画面在做什么）
 
 ## 核心知识点
-（分条列出，标注时间点；有代码/公式/命令时原样给出）
+（**最多 12 条**，每条标注时间点；代码/公式/命令原样给出，其余用概括）
 
 ## 画面证据
-（视频里屏幕上出现的关键内容：幻灯片标题、代码片段、图表数值、软件界面操作，标注时间点）
+（**最多 8 条**屏幕上出现的关键内容：幻灯片标题、代码片段、图表数值、界面操作）
 
 ## 结论与行动项
-（讲者强调的结论、注意事项、可以立刻上手的做法）
+（**最多 5 条**，讲者强调的结论、注意事项、可立刻上手的做法）
 
 ## 值得回看的片段
-（3~5 个时间点 + 一句话理由）
+（**3~5 条**，时间点 + 一句话理由）
+
+全篇正文控制在 **2000~3000 字**。宁可少而准，不要多而全。
 
 ---
 {material}
@@ -128,9 +131,13 @@ def _chat(prov: Provider, system: str, user: str, *, cfg: Config,
         }
         truncations = 0
         for attempt in range(3):
+            # 生成长文本要花时间：timeout 必须随 max_tokens 放大，
+            # 否则大预算请求 100% 会在半路超时，白等一轮
+            budget = int(payload["max_tokens"])
+            timeout = max(prov.timeout, 90.0 + budget / 25.0)
             try:
                 data = post_json(url, payload, headers=hdr,
-                                 timeout=prov.timeout, retries=1)
+                                 timeout=timeout, retries=1)
                 return _message_text(data).strip()
             except TruncatedOutput as e:
                 last = e
@@ -151,7 +158,7 @@ def _chat(prov: Provider, system: str, user: str, *, cfg: Config,
     raise RuntimeError(f"总结模型调用失败: {last}")
 
 
-def _split_material(material: str, limit: int = 24000) -> List[str]:
+def _split_material(material: str, limit: int = 18000) -> List[str]:
     if len(material) <= limit:
         return [material]
     chunks, buf = [], []
@@ -184,11 +191,11 @@ def summarize_material(material: str, cfg: Config, log=print) -> str:
         log(f"  ↳ 第 {i}/{len(chunks)} 段...")
         parts.append(_chat(prov, SYS_PROMPT,
                            CHUNK_PROMPT.format(i=i, n=len(chunks), material=ch),
-                           cfg=cfg, max_tokens=2000, log=log))
+                           cfg=cfg, max_tokens=5000, log=log))
     merged = "\n\n".join(f"### 第{i}段\n{p}" for i, p in enumerate(parts, 1))
     log("🧩 合并分段要点，生成最终笔记...")
     return _chat(prov, SYS_PROMPT, FINAL_PROMPT.format(material=merged),
-                 cfg=cfg, max_tokens=12000, log=log)
+                 cfg=cfg, max_tokens=10000, log=log)
 
 
 __all__ = ["align_timeline", "summarize_material", "SYS_PROMPT", "FINAL_PROMPT"]

@@ -438,7 +438,8 @@ class BiliClient:
     def fetch_subtitle(self, track: SubtitleTrack) -> List[Dict[str, Any]]:
         """下载并解析字幕 JSON → [{start, end, text}, ...]。"""
         try:
-            data = _http.get_json(track.url, headers=self._headers, timeout=30)
+            data = _http.get_json(track.url, headers=self._headers,
+                                 timeout=15, retries=2)
         except Exception:
             return []
         cues = []

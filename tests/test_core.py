@@ -443,17 +443,24 @@ class TestWhisperCpp(unittest.TestCase):
         self.assertEqual(tr.language, "zh")
 
     def test_missing_model_gives_actionable_error(self):
-        from aicbili.asr import transcribe_whisper_cpp
+        from unittest import mock
+
+        from aicbili import asr
 
         cfg = self._cfg()
         cfg.whisper_cpp_model = "/nonexistent/ggml-x.bin"
-        with self.assertRaises(RuntimeError) as ctx:
-            transcribe_whisper_cpp(self.audio, cfg, log=lambda m: None)
+        # 隔离：别去搜真实机器上的 ~/.cache/whisper-cpp（用户可能已经装好了）
+        with mock.patch.object(asr, "_MODEL_HINTS", ()):
+            with self.assertRaises(RuntimeError) as ctx:
+                asr.transcribe_whisper_cpp(self.audio, cfg, log=lambda m: None)
         self.assertIn("ggml", str(ctx.exception))
 
     def test_model_discovery_finds_ggml_and_skips_mmproj(self):
-        from aicbili.asr import find_whisper_cpp_model
+        from unittest import mock
 
+        from aicbili import asr
+
+        find_whisper_cpp_model = asr.find_whisper_cpp_model
         d = Path(self.tmp) / "models"
         d.mkdir(exist_ok=True)
         (d / "mmproj-model.bin").write_bytes(b"x")
@@ -461,8 +468,10 @@ class TestWhisperCpp(unittest.TestCase):
         cwd = os.getcwd()
         try:
             os.chdir(self.tmp)
-            found = find_whisper_cpp_model("./models")
-            self.assertTrue(found and found.endswith("ggml-base.bin"))
+            with mock.patch.object(asr, "_MODEL_HINTS", ("./models",)):
+                found = find_whisper_cpp_model("./models")
+                self.assertTrue(found and found.endswith("ggml-base.bin"))
+                self.assertNotIn("mmproj", found)
         finally:
             os.chdir(cwd)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import json
+import threading
 import re
 import shutil
 import time
@@ -81,7 +82,7 @@ class Analyzer:
     # ------------------------------------------------------------------
     def analyze(self, url: str, *, force: bool = False, no_ai: bool = False,
                 dry_run: bool = False) -> Result:
-        t_start = time.time()
+        t_start = time.monotonic()
         res = Result()
         try:
             video = self.client.resolve(url)
@@ -132,13 +133,13 @@ class Analyzer:
         want_vision = mode in ("auto", "frames", "native") and not dry_run
 
         # ---------------- 2. 字幕探测（最便宜，通常 <300ms） ----------------
-        t0 = time.time()
+        t0 = time.monotonic()
         track: Optional[SubtitleTrack] = None
         try:
             track = pick_subtitle(self.client.subtitles(video.bvid, video.cid))
         except Exception as e:
             self.log(f"  ⚠ 取字幕列表失败（忽略）: {e}")
-        res.timings["subtitles_probe"] = time.time() - t0
+        res.timings["subtitles_probe"] = time.monotonic() - t0
         if track:
             self.log(f"  📜 发现字幕轨: {track.lan_doc}{' (AI)' if track.is_ai else ''}")
 
@@ -219,10 +220,10 @@ class Analyzer:
             self.log("  ⏩ 原生直读已产出结构化结果，跳过二次总结")
         elif (not dry_run and not no_ai and not media.stop_requested()
               and (transcript or visual) and timeline):
-            t0 = time.time()
+            t0 = time.monotonic()
             try:
                 res.summary = summarize.summarize_material(timeline, self.cfg, log=self.log)
-                res.timings["summary"] = time.time() - t0
+                res.timings["summary"] = time.monotonic() - t0
             except Exception as e:
                 res.error = f"总结失败: {e}"
                 self.log(f"  ⚠ {e}")
@@ -236,7 +237,7 @@ class Analyzer:
             res.timings["transcript"] = res.transcript.elapsed
         if res.visual:
             res.timings["visual"] = res.visual.elapsed
-        res.timings["total"] = time.time() - t_start
+        res.timings["total"] = time.monotonic() - t_start
         res.files = files
         res.mode = mode
         md = self._render_markdown(video, res, timeline)
@@ -269,12 +270,12 @@ class Analyzer:
                     ) -> Optional[asr.Transcript]:
         # 1) 有字幕就用字幕：零转写耗时
         if track is not None and self.cfg.asr_backend in ("auto", "subtitle"):
-            t0 = time.time()
+            t0 = time.monotonic()
             try:
                 cues = self.client.fetch_subtitle(track)
                 if cues:
                     tr = asr.from_cues(cues, source=f"subtitle:{track.lan}")
-                    tr.elapsed = time.time() - t0
+                    tr.elapsed = time.monotonic() - t0
                     self.log(f"  📜 使用 B站字幕（跳过 ASR）: {len(cues)} 条")
                     return tr
                 self.log("  ⚠ 字幕为空，改用音频转写")
@@ -294,7 +295,7 @@ class Analyzer:
 
         # 2) 抽音频 → 转写
         audio_path = workdir / "audio.mp3"
-        t0 = time.time()
+        t0 = time.monotonic()
         if dry_run and audio_path.exists():
             self.log(f"  ♻ 复用缓存音频 {audio_path.name}")
         elif not dry_run:
@@ -305,7 +306,7 @@ class Analyzer:
                 windows=windows, bitrate=self.cfg.audio_bitrate,
                 stall_secs=float(self.cfg.audio_stall),
                 user_agent=self.cfg.user_agent, log=self.log)
-            self.log(f"  ✅ 音频就绪，总计 {time.time() - t0:.1f}s")
+            self.log(f"  ✅ 音频就绪，总计 {time.monotonic() - t0:.1f}s")
         if dry_run:
             self.log("  ⏭ dry-run：跳过转写")
             return None
@@ -333,7 +334,7 @@ class Analyzer:
         if not url:
             self.log("  ⚠ 该视频地址不允许匿名访问（B站 CDN 校验 Referer），改用抽帧模式")
             return None
-        t0 = time.time()
+        t0 = time.monotonic()
         try:
             text = self.vlm.watch_video(url, title=video.title)
         except Exception as e:
@@ -342,7 +343,7 @@ class Analyzer:
         note = vision.VisualNote(
             items=[vision.FrameNote(ts=0.0, kind="native", text=text, important=True)],
             gist="（模型原生观看整段视频，含画面与声音）",
-            source="native", elapsed=time.time() - t0)
+            source="native", elapsed=time.monotonic() - t0)
         return note
 
     # ------------------------------------------------------------------
@@ -353,7 +354,7 @@ class Analyzer:
             return None
         if self.cfg.asr_backend not in ("auto", "subtitle"):
             return None
-        t0 = time.time()
+        t0 = time.monotonic()
         try:
             cues = self.client.fetch_subtitle(track)
         except Exception:
@@ -361,20 +362,20 @@ class Analyzer:
         if not cues:
             return None
         tr = asr.from_cues(cues, source=f"subtitle:{track.lan}")
-        tr.elapsed = time.time() - t0
+        tr.elapsed = time.monotonic() - t0
         return tr
 
     def _frames_leg(self, video: Video, vstream: Stream, duration: float,
                     workdir: Path, describe: bool = True) -> Optional[vision.VisualNote]:
         cfg = self.cfg
-        leg_t0 = time.time()
+        leg_t0 = time.monotonic()
         frames_dir = workdir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
 
         # ---- A. 快照雪碧图 → 场景变化检测 ----
         keyframes: List[frames.Candidate] = []
         if cfg.use_storyboard:
-            t0 = time.time()
+            t0 = time.monotonic()
             sb = self.client.storyboard(video.bvid, video.cid)
             if sb and sb.frame_count >= 8:
                 try:
@@ -387,7 +388,7 @@ class Analyzer:
                             threshold=cfg.scene_threshold)
                         self.log(f"  🎞 快照 {sb.frame_count} 帧/{len(blobs)} 张 "
                                  f"({sum(len(b) for b in blobs) // 1024} KB) → 选 {len(keyframes)} 个关键时刻"
-                                 f"（{time.time() - t0:.1f}s）")
+                                 f"（{time.monotonic() - t0:.1f}s）")
                 except Exception as e:
                     self.log(f"  ⚠ 快照处理失败，改用均匀采样: {e}")
             else:
@@ -409,23 +410,91 @@ class Analyzer:
             vstream = Stream(url=order[0], backups=order[1:], id=vstream.id,
                              codec=vstream.codec, width=vstream.width,
                              height=vstream.height, bandwidth=vstream.bandwidth)
-        t0 = time.time()
+        t0 = time.monotonic()
         shots: List[Tuple[float, Image.Image]] = []
+
+        # 抽帧状态：支持「签名过期后重新取流」+「连续失败熔断」
+        st = {
+            "stream": vstream,
+            "lock": threading.Lock(),
+            "consecutive": 0,      # 连续失败次数
+            "fail": 0,
+            "refreshed": 0,
+            "abort": False,
+            "logged": 0,           # 已详细打印的错误条数（避免刷屏）
+        }
+
+        def _refresh_stream() -> bool:
+            """签名过期/DNS 变化后，重新取一次 playurl（至多 2 次）。"""
+            with st["lock"]:
+                if st["refreshed"] >= 2 or st["abort"]:
+                    return False
+                st["refreshed"] += 1
+                n = st["refreshed"]
+            self.log(f"  🔄 流地址可能已过期，重新获取（第 {n} 次）...")
+            try:
+                d = self.client.dash(video.bvid, video.cid, quality=cfg.quality)
+                fresh = d.best_video()
+                if fresh is None:
+                    return False
+                order = media.rank_urls(fresh, sample=65536, timeout=10.0,
+                                        user_agent=cfg.user_agent, log=lambda m: None)
+                if order:
+                    fresh = Stream(url=order[0], backups=order[1:], id=fresh.id,
+                                   codec=fresh.codec, width=fresh.width,
+                                   height=fresh.height, bandwidth=fresh.bandwidth)
+                with st["lock"]:
+                    st["stream"] = fresh
+                    st["consecutive"] = 0
+                return True
+            except Exception as e:
+                self.log(f"  ⚠ 重新取流失败: {media.scrub(str(e), 120)}")
+                return False
 
         def _grab(ts: float) -> Optional[Tuple[float, Image.Image]]:
             out = frames_dir / f"f{int(ts):05d}.jpg"
-            try:
-                if not out.exists():
-                    media.grab_frame(vstream, ts, str(out), width=cfg.frame_width,
-                                     quality=cfg.jpeg_quality, user_agent=cfg.user_agent)
-                return ts, Image.open(out).convert("RGB")
-            except Exception as e:
-                if media.stop_requested():
-                    return None          # 用户中断，不是错误，别刷屏
-                self.log(f"  ⚠ 抽帧 @{int(ts)}s 失败: {e}")
+            if st["abort"] or media.stop_requested():
                 return None
+            for attempt in (0, 1):
+                try:
+                    with st["lock"]:
+                        cur = st["stream"]
+                    if not out.exists() or out.stat().st_size == 0:
+                        media.grab_frame(cur, ts, str(out), width=cfg.frame_width,
+                                         quality=cfg.jpeg_quality,
+                                         user_agent=cfg.user_agent)
+                    img = Image.open(out).convert("RGB")
+                    with st["lock"]:
+                        st["consecutive"] = 0
+                    return ts, img
+                except Exception as e:
+                    if media.stop_requested():
+                        return None
+                    with st["lock"]:
+                        st["fail"] += 1
+                        st["consecutive"] += 1
+                        consec = st["consecutive"]
+                        show = st["logged"] < 3
+                        if show:
+                            st["logged"] += 1
+                    if show:
+                        self.log(f"  ⚠ 抽帧 @{int(ts)}s 失败: {media.scrub(str(e), 160)}")
+                    # 签名过期 / DNS 故障 → 换新地址再试一次
+                    if attempt == 0 and media.looks_like_expired(e) and _refresh_stream():
+                        continue
+                    # 连续失败太多 → 熔断，别再白跑剩下几十帧
+                    if consec >= 6:
+                        with st["lock"]:
+                            already = st["abort"]
+                            st["abort"] = True
+                        if not already:
+                            self.log(f"  ⛔ 连续 {consec} 次抽帧失败（网络/DNS/签名过期），"
+                                     "放弃本视频的画面腿。可稍后重跑（有缓存会自动跳过已完成部分）")
+                    return None
+            return None
 
         ex = cf.ThreadPoolExecutor(max_workers=max(1, cfg.concurrency))
+        futs = {}
         try:
             futs = {ex.submit(_grab, ts): ts for ts in timestamps}
             for fut in cf.as_completed(futs):
@@ -443,7 +512,9 @@ class Analyzer:
                 f.cancel()
             ex.shutdown(wait=True, cancel_futures=True)
         shots.sort(key=lambda x: x[0])
-        self.log(f"  📸 抽 {len(shots)}/{len(timestamps)} 帧，用时 {time.time() - t0:.1f}s"
+        if st["fail"]:
+            self.log(f"  ℹ 抽帧失败 {st['fail']} 次 / 重新取流 {st['refreshed']} 次")
+        self.log(f"  📸 抽 {len(shots)}/{len(timestamps)} 帧，用时 {time.monotonic() - t0:.1f}s"
                  f"（共 {sum((frames_dir / f'f{int(t):05d}.jpg').stat().st_size for t, _ in shots) // 1024} KB）")
         if not shots:
             return None
@@ -452,7 +523,7 @@ class Analyzer:
             note = vision.VisualNote(source="frames-only")
             note.items = [vision.FrameNote(ts=ts, kind="frame", important=False)
                           for ts, _ in shots]
-            note.elapsed = time.time() - leg_t0
+            note.elapsed = time.monotonic() - leg_t0
             self.log(f"  ℹ 已保存 {len(shots)} 帧到 {frames_dir}（未调用视觉模型）")
             return note
 
@@ -469,7 +540,7 @@ class Analyzer:
             payload = frames.jpeg_bytes(img, quality=85)
             return self.vlm.describe_sheet(payload, ts_list, title=video.title)
 
-        t0 = time.time()
+        t0 = time.monotonic()
         ex2 = cf.ThreadPoolExecutor(max_workers=max(1, min(4, cfg.concurrency)))
         try:
             futs = [ex2.submit(_describe, s) for s in sheets]
@@ -484,7 +555,7 @@ class Analyzer:
             for f in futs:
                 f.cancel()
             ex2.shutdown(wait=True, cancel_futures=True)
-        note.elapsed = time.time() - leg_t0    # 含快照、抽帧、视觉调用全过程
+        note.elapsed = time.monotonic() - leg_t0    # 含快照、抽帧、视觉调用全过程
         self.log(f"  👁 视觉理解完成：{len(note.items)} 条笔记"
                  f"（{len(sheets)} 张拼图，画面腿共 {note.elapsed:.1f}s）")
         return note
