@@ -426,7 +426,8 @@ class Analyzer:
                         keyframes = frames.pick_keyframes(
                             cands, max_frames=cfg.max_frames,
                             threshold=cfg.scene_threshold)
-                        self.log(f"  🎞 快照 {sb.frame_count} 帧/{len(blobs)} 张 "
+                        sampled = f"（均匀取样 {len(cands)}）" if len(cands) < sb.frame_count else ""
+                        self.log(f"  🎞 快照 {sb.frame_count} 帧{sampled}/{len(blobs)} 张 "
                                  f"({sum(len(b) for b in blobs) // 1024} KB) → 选 {len(keyframes)} 个关键时刻"
                                  f"（{time.monotonic() - t0:.1f}s）")
                 except Exception as e:

@@ -131,6 +131,41 @@ class TestStoryboard(unittest.TestCase):
         self.assertEqual(len(cands), 8)   # 3 个 0 只留 1 个
 
 
+class TestStoryboardSampling(unittest.TestCase):
+    """长视频的快照不能被截断，否则后半段永远抽不到帧。"""
+
+    def _sprite(self, k=0):
+        import io as _io
+
+        img = Image.new("RGB", (10 * 32, 10 * 18), (k * 20 % 255, 40, 60))
+        b = _io.BytesIO()
+        img.save(b, format="JPEG")
+        return b.getvalue()
+
+    def test_long_storyboard_covers_whole_video(self):
+        from aicbili.bili import Storyboard
+        from aicbili import frames
+
+        ts = [i * 6 for i in range(1170)]           # 116 分钟、每 6s 一帧
+        sb = Storyboard([str(i) for i in range(12)], 10, 10, 32, 18, ts)
+        cands = frames.storyboard_candidates(sb, [self._sprite(k) for k in range(12)])
+        self.assertLessEqual(len(cands), 600)
+        self.assertEqual(cands[0].ts, 0.0)
+        self.assertGreaterEqual(cands[-1].ts, ts[-1] - 12,
+                                "抽样后必须覆盖到片尾，不能只取前 N 帧")
+        gaps = [b.ts - a.ts for a, b in zip(cands, cands[1:])]
+        self.assertLess(max(gaps), 60, "抽样间隔应均匀，不能有大段空洞")
+
+    def test_short_storyboard_not_downsampled(self):
+        from aicbili.bili import Storyboard
+        from aicbili import frames
+
+        ts = [i * 5 for i in range(197)]
+        sb = Storyboard(["a", "b"], 10, 10, 32, 18, ts)
+        cands = frames.storyboard_candidates(sb, [self._sprite(), self._sprite(2)])
+        self.assertEqual(len(cands), 197)
+
+
 class TestKeyframes(unittest.TestCase):
     def _cands(self, n=30, switch_at=15):
         out = []

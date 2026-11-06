@@ -62,8 +62,13 @@ def split_sprite(data: bytes, cols: int, rows: int, cell_w: int = 0,
 
 
 def storyboard_candidates(sb: Storyboard, sheet_bytes: Sequence[bytes],
-                          limit: int = 400) -> List[Candidate]:
-    """把雪碧图列表还原成带时间戳的候选帧序列。"""
+                          limit: int = 600) -> List[Candidate]:
+    """把雪碧图列表还原成带时间戳的候选帧序列。
+
+    ``limit`` 是**均匀抽样上限**，不是截断。这一点很关键：
+    长视频的快照可能上千帧（116 分钟的视频有 1170 帧），如果直接截断到前 N 帧，
+    视频后半段就完全不会参与场景检测 —— 曾经因此让后半段一帧都抽不到。
+    """
     per_sheet = sb.cols * sb.rows
     cands: List[Candidate] = []
     for si, data in enumerate(sheet_bytes):
@@ -80,8 +85,11 @@ def storyboard_candidates(sb: Storyboard, sheet_bytes: Sequence[bytes],
             if cands and abs(ts - cands[-1].ts) < 0.5:
                 continue
             cands.append(Candidate(ts=ts, image=cell))
-            if len(cands) >= limit:
-                return cands
+
+    if limit and len(cands) > limit:
+        step = len(cands) / float(limit)
+        cands = [cands[min(len(cands) - 1, int(i * step))] for i in range(limit)]
+    sb.sampled_total = len(cands)          # 供日志参考
     return cands
 
 

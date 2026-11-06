@@ -106,6 +106,7 @@ class Storyboard:
     cell_w: int
     cell_h: int
     timestamps: List[int]
+    sampled_total: int = 0        # 场景检测实际用了多少帧（可能被均匀降采样）
 
     @property
     def frame_count(self) -> int:
